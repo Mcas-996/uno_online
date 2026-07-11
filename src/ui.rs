@@ -1,4 +1,4 @@
-use crate::core::Color;
+use crate::core::{Action, Color};
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Direction as LayoutDirection, Layout, Rect};
 use ratatui::style::{Color as TuiColor, Modifier, Style};
@@ -300,7 +300,12 @@ fn render_game(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let footer = if app.command_mode {
         format!(":{}", app.command)
     } else {
-        format!("{}\n{}", app.status, app.language.text(Message::GameHint))
+        let hint = game_hint(app);
+        if app.status.is_empty() {
+            hint
+        } else {
+            format!("{}  │  {hint}", app.status)
+        }
     };
     frame.render_widget(
         Paragraph::new(footer).alignment(Alignment::Center).block(
@@ -314,6 +319,31 @@ fn render_game(frame: &mut Frame<'_>, app: &App, area: Rect) {
         ),
         rows[5],
     );
+}
+
+fn game_hint(app: &App) -> String {
+    let game = app.game.as_ref().expect("game hint has game");
+    let mut hints = Vec::new();
+
+    if game.current_player() == &app.human_id
+        && let Ok(actions) = game.legal_actions(&app.human_id)
+    {
+        if actions
+            .iter()
+            .any(|action| matches!(action, Action::Play { .. }))
+        {
+            hints.push(app.language.text(Message::PlayHint));
+        }
+        if actions.iter().any(|action| matches!(action, Action::Draw)) {
+            hints.push(app.language.text(Message::DrawHint));
+        }
+        if actions.iter().any(|action| matches!(action, Action::Pass)) {
+            hints.push(app.language.text(Message::PassHint));
+        }
+    }
+
+    hints.push(app.language.text(Message::GameUtilitiesHint));
+    hints.join(" · ")
 }
 
 fn render_color_picker(frame: &mut Frame<'_>, app: &App, area: Rect) {
@@ -393,6 +423,7 @@ mod tests {
     use ratatui::backend::TestBackend;
 
     use super::*;
+    use crate::core::Action;
     use crate::i18n::Language;
 
     fn contents(terminal: &Terminal<TestBackend>) -> String {
@@ -430,6 +461,65 @@ mod tests {
         assert!(screen.contains("Your hand"));
         assert!(screen.contains("AI 1: 7 cards"));
         assert!(!screen.contains("AI 1 hand"));
+    }
+
+    #[test]
+    fn game_hint_changes_after_drawing() {
+        let backend = TestBackend::new(140, 28);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut app = App::new(Language::English);
+        app.setup.bot_count = 1;
+        app.start_match().unwrap();
+
+        terminal.draw(|frame| render(frame, &app)).unwrap();
+        let screen = contents(&terminal);
+        assert!(screen.contains("D draw"));
+        assert!(!screen.contains("P pass"));
+
+        app.game
+            .as_mut()
+            .unwrap()
+            .apply_action(&app.human_id, Action::Draw)
+            .unwrap();
+        terminal.draw(|frame| render(frame, &app)).unwrap();
+        let screen = contents(&terminal);
+        assert!(!screen.contains("D draw"));
+        assert!(screen.contains("P pass"));
+    }
+
+    #[test]
+    fn ai_turn_hides_human_action_hints() {
+        let backend = TestBackend::new(140, 28);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut app = App::new(Language::English);
+        app.setup.bot_count = 1;
+        app.start_match().unwrap();
+        let game = app.game.as_mut().unwrap();
+        game.apply_action(&app.human_id, Action::Draw).unwrap();
+        game.apply_action(&app.human_id, Action::Pass).unwrap();
+
+        terminal.draw(|frame| render(frame, &app)).unwrap();
+        let screen = contents(&terminal);
+        assert!(!screen.contains("Enter play"));
+        assert!(!screen.contains("D draw"));
+        assert!(!screen.contains("P pass"));
+        assert!(screen.contains("? help · Q quit"));
+    }
+
+    #[test]
+    fn chinese_game_renders_localized_action_hint() {
+        let backend = TestBackend::new(100, 28);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut app = App::new(Language::Chinese);
+        app.setup.bot_count = 1;
+        app.start_match().unwrap();
+
+        terminal.draw(|frame| render(frame, &app)).unwrap();
+        let screen = contents(&terminal);
+        assert!(screen.contains('摸'));
+        assert!(screen.contains('牌'));
+        assert!(screen.contains('帮'));
+        assert!(screen.contains('退'));
     }
 
     #[test]
