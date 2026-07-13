@@ -1,3 +1,7 @@
+//! * STAR CARNIVAL TABLE *
+//!
+//! GBK-safe text with bright terminal-native Holiday styling.
+
 use crate::core::{Action, Color};
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Direction as LayoutDirection, Layout, Rect};
@@ -17,11 +21,7 @@ pub fn render(frame: &mut Frame<'_>, app: &App) {
         frame.render_widget(
             Paragraph::new(app.language.text(Message::TooSmall))
                 .alignment(Alignment::Center)
-                .block(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .title(app.language.text(Message::Title)),
-                )
+                .block(carnival_block(app.language.text(Message::Title)))
                 .wrap(Wrap { trim: true }),
             area,
         );
@@ -39,7 +39,7 @@ pub fn render(frame: &mut Frame<'_>, app: &App) {
             frame,
             area,
             62,
-            17,
+            21,
             app.language.text(Message::Help),
             app.language.text(Message::HelpBody),
         ),
@@ -70,7 +70,7 @@ pub fn render(frame: &mut Frame<'_>, app: &App) {
                 8,
                 app.language.text(Message::Winner),
                 &format!(
-                    "🏆 {winner}\n\n{}",
+                    "[WIN] * {winner} *\n\n{}",
                     app.language.text(Message::NewMatchHint)
                 ),
             );
@@ -84,12 +84,12 @@ pub fn render(frame: &mut Frame<'_>, app: &App) {
 }
 
 fn render_setup(frame: &mut Frame<'_>, app: &App, area: Rect) {
-    let outer = centered(area, 58, 16);
+    let outer = centered(area, 62, 18);
     let rows = Layout::default()
         .direction(LayoutDirection::Vertical)
         .constraints([
             Constraint::Length(3),
-            Constraint::Min(8),
+            Constraint::Min(10),
             Constraint::Length(3),
         ])
         .split(outer);
@@ -98,10 +98,14 @@ fn render_setup(frame: &mut Frame<'_>, app: &App, area: Rect) {
             .alignment(Alignment::Center)
             .style(
                 Style::default()
-                    .fg(TuiColor::Yellow)
+                    .fg(TuiColor::LightYellow)
                     .add_modifier(Modifier::BOLD),
             )
-            .block(Block::default().borders(Borders::TOP | Borders::LEFT | Borders::RIGHT)),
+            .block(
+                Block::default()
+                    .borders(Borders::TOP | Borders::LEFT | Borders::RIGHT)
+                    .border_style(carnival_border()),
+            ),
         rows[0],
     );
 
@@ -121,18 +125,23 @@ fn render_setup(frame: &mut Frame<'_>, app: &App, area: Rect) {
             app.language.text(Message::Difficulty),
             app.language.difficulty(app.setup.difficulty)
         ),
+        format!(
+            "{}: {}",
+            app.language.text(Message::Deck),
+            app.language.deck_variant(app.setup.deck_variant)
+        ),
         app.language.text(Message::Start).to_owned(),
     ];
     let items = values.into_iter().enumerate().map(|(index, value)| {
         let prefix = if index == app.setup.selected {
-            "▶ "
+            "> "
         } else {
             "  "
         };
         let style = if index == app.setup.selected {
             Style::default()
                 .fg(TuiColor::Black)
-                .bg(TuiColor::Yellow)
+                .bg(TuiColor::LightYellow)
                 .add_modifier(Modifier::BOLD)
         } else {
             Style::default()
@@ -141,16 +150,20 @@ fn render_setup(frame: &mut Frame<'_>, app: &App, area: Rect) {
     });
     frame.render_widget(
         List::new(items).block(
-            Block::default()
-                .borders(Borders::LEFT | Borders::RIGHT)
-                .title(app.language.text(Message::Setup)),
+            carnival_block(app.language.text(Message::Setup))
+                .borders(Borders::LEFT | Borders::RIGHT),
         ),
         rows[1],
     );
     frame.render_widget(
         Paragraph::new(app.language.text(Message::SetupHint))
             .alignment(Alignment::Center)
-            .block(Block::default().borders(Borders::BOTTOM | Borders::LEFT | Borders::RIGHT)),
+            .style(Style::default().fg(TuiColor::LightCyan))
+            .block(
+                Block::default()
+                    .borders(Borders::BOTTOM | Borders::LEFT | Borders::RIGHT)
+                    .border_style(carnival_border()),
+            ),
         rows[2],
     );
 }
@@ -177,8 +190,9 @@ fn render_game(frame: &mut Frame<'_>, app: &App, area: Rect) {
         .map(|player| player.name.as_str())
         .unwrap_or("?");
     let header = format!(
-        "{}  │  {}: {}  │  {}: {}",
+        "{}  |  {}  |  {}: {}  |  {}: {}",
         app.language.text(Message::Title),
+        app.language.deck_variant(game.deck_variant()),
         app.language.text(Message::Turn),
         current_name,
         app.language.text(Message::Direction),
@@ -189,10 +203,10 @@ fn render_game(frame: &mut Frame<'_>, app: &App, area: Rect) {
             .alignment(Alignment::Center)
             .style(
                 Style::default()
-                    .fg(TuiColor::Yellow)
+                    .fg(TuiColor::LightYellow)
                     .add_modifier(Modifier::BOLD),
             )
-            .block(Block::default().borders(Borders::ALL)),
+            .block(carnival_block("* STAR TABLE *")),
         rows[0],
     );
 
@@ -209,18 +223,18 @@ fn render_game(frame: &mut Frame<'_>, app: &App, area: Rect) {
             )
         })
         .collect::<Vec<_>>()
-        .join("   │   ");
+        .join("   |   ");
     frame.render_widget(
         Paragraph::new(opponents)
             .alignment(Alignment::Center)
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title(app.language.text(Message::Opponents)),
-            ),
+            .style(Style::default().fg(TuiColor::LightCyan))
+            .block(carnival_block(app.language.text(Message::Opponents))),
         rows[1],
     );
 
+    let mut discard_line = vec![Span::raw("      [ ")];
+    discard_line.extend(styled_card(app.language, state.discard_top, false));
+    discard_line.push(Span::raw(" ]"));
     let table = vec![
         Line::from(vec![
             Span::raw(format!("{}: ", app.language.text(Message::ActiveColor))),
@@ -231,25 +245,12 @@ fn render_game(frame: &mut Frame<'_>, app: &App, area: Rect) {
                     .add_modifier(Modifier::BOLD),
             ),
         ]),
-        Line::from(vec![
-            Span::raw("      "),
-            Span::styled(
-                format!("[ {} ]", app.language.card(state.discard_top)),
-                Style::default()
-                    .fg(state
-                        .discard_top
-                        .color
-                        .map_or(TuiColor::Magenta, card_color))
-                    .add_modifier(Modifier::BOLD),
-            ),
-        ]),
+        Line::from(discard_line),
     ];
     frame.render_widget(
-        Paragraph::new(table).alignment(Alignment::Center).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(app.language.text(Message::Table)),
-        ),
+        Paragraph::new(table)
+            .alignment(Alignment::Center)
+            .block(carnival_block(app.language.text(Message::Table))),
         rows[2],
     );
 
@@ -259,27 +260,24 @@ fn render_game(frame: &mut Frame<'_>, app: &App, area: Rect) {
         .iter()
         .enumerate()
         .flat_map(|(index, card)| {
-            let mut style = Style::default().fg(card.color.map_or(TuiColor::Magenta, card_color));
-            if index == app.selected_card {
-                style = style.bg(TuiColor::White).add_modifier(Modifier::BOLD);
-            }
-            [
-                Span::styled(
-                    format!(" {}:[{}] ", index + 1, app.language.card(*card)),
-                    style,
-                ),
-                Span::raw(" "),
-            ]
+            let selected = index == app.selected_card;
+            let mut spans = vec![Span::styled(
+                format!(" {}:[", index + 1),
+                selected_style(Style::default().fg(TuiColor::Gray), selected),
+            )];
+            spans.extend(styled_card(app.language, *card, selected));
+            spans.push(Span::styled(
+                "] ",
+                selected_style(Style::default().fg(TuiColor::Gray), selected),
+            ));
+            spans.push(Span::raw(" "));
+            spans
         })
         .collect::<Vec<_>>();
     frame.render_widget(
         Paragraph::new(Line::from(hand_spans))
             .wrap(Wrap { trim: false })
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title(app.language.text(Message::YourHand)),
-            ),
+            .block(carnival_block(app.language.text(Message::YourHand))),
         rows[3],
     );
 
@@ -289,11 +287,7 @@ fn render_game(frame: &mut Frame<'_>, app: &App, area: Rect) {
         .rev()
         .map(|line| ListItem::new(line.as_str()));
     frame.render_widget(
-        List::new(log_items).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(app.language.text(Message::EventLog)),
-        ),
+        List::new(log_items).block(carnival_block(app.language.text(Message::EventLog))),
         rows[4],
     );
 
@@ -308,15 +302,14 @@ fn render_game(frame: &mut Frame<'_>, app: &App, area: Rect) {
         }
     };
     frame.render_widget(
-        Paragraph::new(footer).alignment(Alignment::Center).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(if app.command_mode {
-                    app.language.text(Message::Command)
-                } else {
-                    ""
-                }),
-        ),
+        Paragraph::new(footer)
+            .alignment(Alignment::Center)
+            .style(Style::default().fg(TuiColor::LightCyan))
+            .block(carnival_block(if app.command_mode {
+                app.language.text(Message::Command)
+            } else {
+                ""
+            })),
         rows[5],
     );
 }
@@ -369,11 +362,7 @@ fn render_color_picker(frame: &mut Frame<'_>, app: &App, area: Rect) {
             Line::from(app.language.text(Message::ColorHint)),
         ])
         .alignment(Alignment::Center)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(app.language.text(Message::ChooseColor)),
-        ),
+        .block(carnival_block(app.language.text(Message::ChooseColor))),
         popup,
     );
 }
@@ -392,7 +381,7 @@ fn render_overlay(
         Paragraph::new(body)
             .alignment(Alignment::Center)
             .wrap(Wrap { trim: false })
-            .block(Block::default().borders(Borders::ALL).title(title)),
+            .block(carnival_block(title)),
         popup,
     );
 }
@@ -415,6 +404,77 @@ fn card_color(color: Color) -> TuiColor {
         Color::Green => TuiColor::Green,
         Color::Blue => TuiColor::Blue,
     }
+}
+
+// ===== * CARD LIGHTS * =====
+
+fn styled_card(
+    language: crate::i18n::Language,
+    card: crate::core::Card,
+    selected: bool,
+) -> Vec<Span<'static>> {
+    use crate::core::Rank;
+
+    if matches!(card.rank, Rank::WildDrawSixteen) {
+        let wild = match language {
+            crate::i18n::Language::English => "WILD",
+            crate::i18n::Language::Chinese => "变色",
+        };
+        return vec![
+            themed_span("< ", TuiColor::LightYellow, selected),
+            themed_span(wild, TuiColor::LightRed, selected),
+            themed_span(" +", TuiColor::LightYellow, selected),
+            themed_span("1", TuiColor::LightGreen, selected),
+            themed_span("6", TuiColor::LightBlue, selected),
+            themed_span(" >", TuiColor::LightYellow, selected),
+        ];
+    }
+
+    let color = match card.rank {
+        Rank::DrawEight => card.color.map_or(TuiColor::LightYellow, card_color),
+        _ => card.color.map_or(TuiColor::LightMagenta, card_color),
+    };
+    vec![themed_span(language.card(card), color, selected)]
+}
+
+fn themed_span(
+    content: impl Into<std::borrow::Cow<'static, str>>,
+    color: TuiColor,
+    selected: bool,
+) -> Span<'static> {
+    Span::styled(
+        content,
+        selected_style(
+            Style::default().fg(color).add_modifier(Modifier::BOLD),
+            selected,
+        ),
+    )
+}
+
+fn selected_style(style: Style, selected: bool) -> Style {
+    if selected {
+        style.bg(TuiColor::White).add_modifier(Modifier::BOLD)
+    } else {
+        style
+    }
+}
+
+fn carnival_border() -> Style {
+    Style::default()
+        .fg(TuiColor::LightYellow)
+        .add_modifier(Modifier::BOLD)
+}
+
+fn carnival_block(title: &str) -> Block<'_> {
+    Block::default()
+        .borders(Borders::ALL)
+        .border_style(carnival_border())
+        .title(title)
+        .title_style(
+            Style::default()
+                .fg(TuiColor::LightMagenta)
+                .add_modifier(Modifier::BOLD),
+        )
 }
 
 #[cfg(test)]
@@ -447,6 +507,9 @@ mod tests {
         let screen = contents(&terminal);
         assert!(screen.contains('新'));
         assert!(screen.contains('电'));
+        assert!(screen.contains('节'));
+        assert!(screen.contains('日'));
+        assert!(screen.contains("118"));
     }
 
     #[test]
@@ -529,5 +592,70 @@ mod tests {
         let app = App::new(Language::English);
         terminal.draw(|frame| render(frame, &app)).unwrap();
         assert!(contents(&terminal).contains("Terminal too small"));
+    }
+
+    #[test]
+    fn holiday_card_styles_keep_penalty_text_and_four_colors() {
+        use crate::core::{Card, Rank};
+
+        let draw_eight = styled_card(
+            Language::English,
+            Card::new(Color::Red, Rank::DrawEight),
+            false,
+        );
+        assert_eq!(draw_eight.len(), 1);
+        assert!(draw_eight[0].content.contains("+8"));
+        assert_eq!(draw_eight[0].style.fg, Some(TuiColor::Red));
+
+        let wild = styled_card(Language::English, Card::wild(Rank::WildDrawSixteen), false);
+        let label = wild
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        let colors = wild
+            .iter()
+            .filter_map(|span| span.style.fg)
+            .collect::<Vec<_>>();
+        assert!(label.contains("WILD +16"));
+        assert!(colors.contains(&TuiColor::LightRed));
+        assert!(colors.contains(&TuiColor::LightYellow));
+        assert!(colors.contains(&TuiColor::LightGreen));
+        assert!(colors.contains(&TuiColor::LightBlue));
+    }
+
+    #[test]
+    fn standard_setup_variant_is_visible() {
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut app = App::new(Language::English);
+        app.setup.deck_variant = crate::core::DeckVariant::Standard;
+        terminal.draw(|frame| render(frame, &app)).unwrap();
+        let screen = contents(&terminal);
+        assert!(screen.contains("Standard 108"));
+        assert!(screen.contains("STAR CARNIVAL"));
+    }
+
+    #[test]
+    fn holiday_help_color_picker_and_result_use_themed_copy() {
+        use crate::core::{Card, Rank};
+
+        let backend = TestBackend::new(100, 28);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut app = App::new(Language::English);
+        app.screen = Screen::Help;
+        terminal.draw(|frame| render(frame, &app)).unwrap();
+        let screen = contents(&terminal);
+        assert!(screen.contains("STAR CARNIVAL"));
+        assert!(screen.contains("WILD +16 changes color"));
+
+        app.start_match().unwrap();
+        app.pending_wild = Some(Card::wild(Rank::WildDrawSixteen));
+        terminal.draw(|frame| render(frame, &app)).unwrap();
+        assert!(contents(&terminal).contains("Choose a color"));
+
+        app.pending_wild = None;
+        app.screen = Screen::Result;
+        terminal.draw(|frame| render(frame, &app)).unwrap();
+        assert!(contents(&terminal).contains("[WIN]"));
     }
 }

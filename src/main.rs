@@ -1,3 +1,7 @@
+//! * STAR CARNIVAL LAUNCHER *
+//!
+//! Cross-platform terminal entry and reliable cleanup.
+
 mod ai;
 mod app;
 mod core;

@@ -1,3 +1,7 @@
+//! * STAR CARNIVAL AI *
+//!
+//! Legal local strategies with explicit Holiday-card pressure.
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::str::FromStr;
@@ -107,8 +111,10 @@ fn choose_scored<R: Rng + ?Sized>(
                 Rank::Number(number) => i32::from(number) / 3,
                 Rank::Skip | Rank::Reverse => 4,
                 Rank::DrawTwo => 6,
+                Rank::DrawEight => 12,
                 Rank::Wild => 1,
                 Rank::WildDrawFour => 7,
+                Rank::WildDrawSixteen => 15,
             };
         if card.is_wild() && has_colored_play {
             score -= 8;
@@ -116,6 +122,8 @@ fn choose_scored<R: Rng + ?Sized>(
         if difficulty == Difficulty::Hard && next_hand <= 2 {
             score += match card.rank {
                 Rank::WildDrawFour => 14,
+                Rank::WildDrawSixteen => 22,
+                Rank::DrawEight => 18,
                 Rank::DrawTwo => 12,
                 Rank::Skip | Rank::Reverse => 10,
                 Rank::Number(_) | Rank::Wild => 0,
@@ -281,6 +289,26 @@ mod tests {
             Action::Play {
                 card: wild,
                 chosen_color: Some(Color::Blue)
+            }
+        );
+    }
+
+    #[test]
+    fn hard_wild_draw_sixteen_chooses_dominant_color() {
+        let wild_sixteen = Card::wild(Rank::WildDrawSixteen);
+        let hand = [
+            wild_sixteen,
+            Card::new(Color::Blue, Rank::Number(2)),
+            Card::new(Color::Blue, Rank::Number(6)),
+        ];
+        let legal = [play(wild_sixteen), Action::Draw];
+        let mut rng = StdRng::seed_from_u64(8);
+
+        assert_eq!(
+            choose_action(Difficulty::Hard, &state(2), &hand, &legal, &mut rng),
+            Action::Play {
+                card: wild_sixteen,
+                chosen_color: Some(Color::Blue),
             }
         );
     }

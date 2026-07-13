@@ -1,8 +1,12 @@
+//! * STAR CARNIVAL APP *
+//!
+//! Setup, input, local turns, and Holiday color selection.
+
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
 use crate::ai::{Difficulty, choose_action};
-use crate::core::{Action, Card, Color, EventKind, Game, GameEvent, PlayerId};
+use crate::core::{Action, Card, Color, DeckVariant, EventKind, Game, GameEvent, PlayerId};
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use rand::SeedableRng;
 use rand::rngs::StdRng;
@@ -26,6 +30,7 @@ pub struct Setup {
     pub name: String,
     pub bot_count: usize,
     pub difficulty: Difficulty,
+    pub deck_variant: DeckVariant,
     pub selected: usize,
 }
 
@@ -38,6 +43,7 @@ impl Setup {
             },
             bot_count: 3,
             difficulty: Difficulty::Normal,
+            deck_variant: DeckVariant::Holiday,
             selected: 0,
         }
     }
@@ -106,7 +112,8 @@ impl App {
             };
             (id.clone(), name)
         }));
-        self.game = Some(Game::new(players).map_err(|error| error.to_string())?);
+        self.game =
+            Some(Game::new(players, self.setup.deck_variant).map_err(|error| error.to_string())?);
         self.screen = Screen::Game;
         self.selected_card = 0;
         self.command_mode = false;
@@ -167,15 +174,15 @@ impl App {
     fn handle_setup_key(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Up => self.setup.selected = self.setup.selected.saturating_sub(1),
-            KeyCode::Down => self.setup.selected = (self.setup.selected + 1).min(3),
+            KeyCode::Down => self.setup.selected = (self.setup.selected + 1).min(4),
             KeyCode::Left => self.adjust_setup(-1),
             KeyCode::Right => self.adjust_setup(1),
-            KeyCode::Enter if self.setup.selected == 3 => {
+            KeyCode::Enter if self.setup.selected == 4 => {
                 if let Err(error) = self.start_match() {
                     self.status = error;
                 }
             }
-            KeyCode::Enter => self.setup.selected = (self.setup.selected + 1).min(3),
+            KeyCode::Enter => self.setup.selected = (self.setup.selected + 1).min(4),
             KeyCode::Backspace if self.setup.selected == 0 => {
                 self.setup.name.pop();
             }
@@ -208,6 +215,15 @@ impl App {
                     .saturating_add_signed(delta)
                     .clamp(0, Difficulty::ALL.len() - 1);
                 self.setup.difficulty = Difficulty::ALL[index];
+            }
+            3 => {
+                let index = DeckVariant::ALL
+                    .iter()
+                    .position(|candidate| *candidate == self.setup.deck_variant)
+                    .unwrap_or(1)
+                    .saturating_add_signed(delta)
+                    .clamp(0, DeckVariant::ALL.len() - 1);
+                self.setup.deck_variant = DeckVariant::ALL[index];
             }
             _ => {}
         }
@@ -497,8 +513,19 @@ mod tests {
                 app.game.as_ref().unwrap().public_state().players.len(),
                 bots + 1
             );
+            assert_eq!(
+                app.game.as_ref().unwrap().deck_variant(),
+                DeckVariant::Holiday
+            );
             app.return_to_setup();
         }
+
+        app.setup.deck_variant = DeckVariant::Standard;
+        app.start_match().unwrap();
+        assert_eq!(
+            app.game.as_ref().unwrap().deck_variant(),
+            DeckVariant::Standard
+        );
     }
 
     #[test]
@@ -513,6 +540,14 @@ mod tests {
             app.adjust_setup(1);
         }
         assert_eq!(app.setup.bot_count, 4);
+
+        assert_eq!(app.setup.deck_variant, DeckVariant::Holiday);
+        app.setup.selected = 3;
+        app.adjust_setup(-1);
+        assert_eq!(app.setup.deck_variant, DeckVariant::Standard);
+        app.adjust_setup(1);
+        app.adjust_setup(1);
+        assert_eq!(app.setup.deck_variant, DeckVariant::Holiday);
     }
 
     #[test]

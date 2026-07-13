@@ -1,4 +1,6 @@
-//! UNO cards, rules, turn state, and game events.
+//! * STAR CARNIVAL CORE *
+//!
+//! UNO cards, deck variants, rules, turn state, and game events.
 
 use std::collections::BTreeSet;
 use std::fmt;
@@ -10,6 +12,19 @@ use rand::seq::SliceRandom;
 pub const MIN_PLAYERS: usize = 2;
 pub const MAX_PLAYERS: usize = 5;
 pub const STARTING_HAND_SIZE: usize = 7;
+
+// ===== * DECK VARIANTS * =====
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum DeckVariant {
+    Standard,
+    #[default]
+    Holiday,
+}
+
+impl DeckVariant {
+    pub const ALL: [Self; 2] = [Self::Standard, Self::Holiday];
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub enum Color {
@@ -54,8 +69,10 @@ pub enum Rank {
     Skip,
     Reverse,
     DrawTwo,
+    DrawEight,
     Wild,
     WildDrawFour,
+    WildDrawSixteen,
 }
 
 impl fmt::Display for Rank {
@@ -65,8 +82,10 @@ impl fmt::Display for Rank {
             Self::Skip => f.write_str("skip"),
             Self::Reverse => f.write_str("reverse"),
             Self::DrawTwo => f.write_str("draw-two"),
+            Self::DrawEight => f.write_str("draw-eight"),
             Self::Wild => f.write_str("wild"),
             Self::WildDrawFour => f.write_str("wild-draw-four"),
+            Self::WildDrawSixteen => f.write_str("wild-draw-sixteen"),
         }
     }
 }
@@ -90,7 +109,10 @@ impl Card {
     }
 
     pub fn is_wild(self) -> bool {
-        matches!(self.rank, Rank::Wild | Rank::WildDrawFour)
+        matches!(
+            self.rank,
+            Rank::Wild | Rank::WildDrawFour | Rank::WildDrawSixteen
+        )
     }
 }
 
@@ -203,6 +225,7 @@ pub struct PublicGameState {
 
 #[derive(Debug)]
 pub struct Game {
+    deck_variant: DeckVariant,
     players: Vec<Player>,
     draw_pile: Vec<Card>,
     discard_pile: Vec<Card>,
@@ -243,16 +266,27 @@ impl fmt::Display for GameError {
 impl std::error::Error for GameError {}
 
 impl Game {
-    pub fn new(players: Vec<(PlayerId, String)>) -> Result<Self, GameError> {
-        Self::new_with_rng(players, StdRng::from_entropy())
+    pub fn new(
+        players: Vec<(PlayerId, String)>,
+        deck_variant: DeckVariant,
+    ) -> Result<Self, GameError> {
+        Self::new_with_rng(players, deck_variant, StdRng::from_entropy())
     }
 
     #[cfg(test)]
-    fn new_seeded(players: Vec<(PlayerId, String)>, seed: u64) -> Result<Self, GameError> {
-        Self::new_with_rng(players, StdRng::seed_from_u64(seed))
+    fn new_seeded(
+        players: Vec<(PlayerId, String)>,
+        deck_variant: DeckVariant,
+        seed: u64,
+    ) -> Result<Self, GameError> {
+        Self::new_with_rng(players, deck_variant, StdRng::seed_from_u64(seed))
     }
 
-    fn new_with_rng(players: Vec<(PlayerId, String)>, mut rng: StdRng) -> Result<Self, GameError> {
+    fn new_with_rng(
+        players: Vec<(PlayerId, String)>,
+        deck_variant: DeckVariant,
+        mut rng: StdRng,
+    ) -> Result<Self, GameError> {
         if !(MIN_PLAYERS..=MAX_PLAYERS).contains(&players.len()) {
             return Err(GameError::InvalidPlayerCount(players.len()));
         }
@@ -263,7 +297,7 @@ impl Game {
             }
         }
 
-        let mut deck = standard_deck();
+        let mut deck = deck(deck_variant);
         deck.shuffle(&mut rng);
         let mut player_states = Vec::with_capacity(players.len());
         for (id, name) in players {
@@ -281,6 +315,7 @@ impl Game {
         let first_discard = deck.swap_remove(discard_index);
         let active_color = first_discard.color.expect("number cards have a color");
         let mut game = Self {
+            deck_variant,
             players: player_states,
             draw_pile: deck,
             discard_pile: vec![first_discard],
@@ -298,6 +333,10 @@ impl Game {
 
     pub fn current_player(&self) -> &PlayerId {
         &self.players[self.current_index].id
+    }
+
+    pub const fn deck_variant(&self) -> DeckVariant {
+        self.deck_variant
     }
 
     pub fn hand_for(&self, player: &PlayerId) -> Result<&[Card], GameError> {
@@ -411,6 +450,7 @@ impl Game {
             return Err(GameError::UnexpectedColorChoice);
         }
 
+        // ===== * NUMBER CARNIVAL * =====
         // Number cards may be stacked as a house rule: playing one discards every
         // card with the same number. Keep the explicitly played card on top so
         // its color determines the next legal play.
@@ -445,7 +485,7 @@ impl Game {
 
         let won = self.players[player_index].hand.is_empty();
         if !won {
-            self.apply_card_effect(card)?;
+            self.apply_card_effect(card);
         }
         let event = self.push_event(EventKind::CardPlayed {
             player: player.clone(),
@@ -486,7 +526,9 @@ impl Game {
         }))
     }
 
-    fn apply_card_effect(&mut self, card: Card) -> Result<(), GameError> {
+    // ===== * ACTION CARD FIREWORKS * =====
+
+    fn apply_card_effect(&mut self, card: Card) {
         match card.rank {
             Rank::Reverse => {
                 self.direction.reverse();
@@ -496,18 +538,29 @@ impl Game {
             Rank::DrawTwo => {
                 self.advance_turn(1);
                 let target = self.current_player().clone();
-                self.draw_cards_to_player(&target, 2)?;
+                self.draw_available_cards_to_player(&target, 2);
+                self.advance_turn(1);
+            }
+            Rank::DrawEight => {
+                self.advance_turn(1);
+                let target = self.current_player().clone();
+                self.draw_available_cards_to_player(&target, 8);
                 self.advance_turn(1);
             }
             Rank::WildDrawFour => {
                 self.advance_turn(1);
                 let target = self.current_player().clone();
-                self.draw_cards_to_player(&target, 4)?;
+                self.draw_available_cards_to_player(&target, 4);
+                self.advance_turn(1);
+            }
+            Rank::WildDrawSixteen => {
+                self.advance_turn(1);
+                let target = self.current_player().clone();
+                self.draw_available_cards_to_player(&target, 16);
                 self.advance_turn(1);
             }
             Rank::Number(_) | Rank::Wild => self.advance_turn(1),
         }
-        Ok(())
     }
 
     fn is_playable_for(&self, hand: &[Card], card: Card) -> bool {
@@ -524,13 +577,19 @@ impl Game {
             || (!top.is_wild() && card.rank == top.rank)
     }
 
-    fn draw_cards_to_player(&mut self, player: &PlayerId, count: usize) -> Result<(), GameError> {
-        let index = self.player_index(player)?;
+    fn draw_available_cards_to_player(&mut self, player: &PlayerId, count: usize) -> usize {
+        let index = self
+            .player_index(player)
+            .expect("penalty target is always a player");
+        let mut drawn = 0;
         for _ in 0..count {
-            let card = self.draw_card()?;
+            let Ok(card) = self.draw_card() else {
+                break;
+            };
             self.players[index].hand.push(card);
+            drawn += 1;
         }
-        Ok(())
+        drawn
     }
 
     fn draw_card(&mut self) -> Result<Card, GameError> {
@@ -588,6 +647,13 @@ impl Game {
     }
 }
 
+pub fn deck(variant: DeckVariant) -> Vec<Card> {
+    match variant {
+        DeckVariant::Standard => standard_deck(),
+        DeckVariant::Holiday => holiday_deck(),
+    }
+}
+
 pub fn standard_deck() -> Vec<Card> {
     let mut deck = Vec::with_capacity(108);
     for color in Color::ALL {
@@ -608,6 +674,18 @@ pub fn standard_deck() -> Vec<Card> {
     deck
 }
 
+pub fn holiday_deck() -> Vec<Card> {
+    let mut deck = standard_deck();
+    deck.reserve(10);
+    for color in Color::ALL {
+        deck.push(Card::new(color, Rank::DrawEight));
+        deck.push(Card::new(color, Rank::DrawEight));
+    }
+    deck.push(Card::wild(Rank::WildDrawSixteen));
+    deck.push(Card::wild(Rank::WildDrawSixteen));
+    deck
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -619,7 +697,7 @@ mod tests {
     }
 
     fn game() -> Game {
-        Game::new_seeded(players(2), 7).unwrap()
+        Game::new_seeded(players(2), DeckVariant::Standard, 7).unwrap()
     }
 
     #[test]
@@ -628,22 +706,42 @@ mod tests {
     }
 
     #[test]
+    fn holiday_deck_has_exact_expansion_cards() {
+        let deck = holiday_deck();
+        assert_eq!(deck.len(), 118);
+        for color in Color::ALL {
+            assert_eq!(
+                deck.iter()
+                    .filter(|card| **card == Card::new(color, Rank::DrawEight))
+                    .count(),
+                2
+            );
+        }
+        assert_eq!(
+            deck.iter()
+                .filter(|card| **card == Card::wild(Rank::WildDrawSixteen))
+                .count(),
+            2
+        );
+    }
+
+    #[test]
     fn player_count_is_two_to_five() {
         assert_eq!(
-            Game::new_seeded(players(1), 1).unwrap_err(),
+            Game::new_seeded(players(1), DeckVariant::Standard, 1).unwrap_err(),
             GameError::InvalidPlayerCount(1)
         );
-        assert!(Game::new_seeded(players(5), 1).is_ok());
+        assert!(Game::new_seeded(players(5), DeckVariant::Holiday, 1).is_ok());
         assert_eq!(
-            Game::new_seeded(players(6), 1).unwrap_err(),
+            Game::new_seeded(players(6), DeckVariant::Standard, 1).unwrap_err(),
             GameError::InvalidPlayerCount(6)
         );
     }
 
     #[test]
     fn seed_reproduces_initial_state() {
-        let first = Game::new_seeded(players(3), 42).unwrap();
-        let second = Game::new_seeded(players(3), 42).unwrap();
+        let first = Game::new_seeded(players(3), DeckVariant::Holiday, 42).unwrap();
+        let second = Game::new_seeded(players(3), DeckVariant::Holiday, 42).unwrap();
         assert_eq!(first.public_state(), second.public_state());
         assert_eq!(
             first.hand_for(&PlayerId::new("p0")),
@@ -702,6 +800,140 @@ mod tests {
             .unwrap_err(),
             GameError::WildDrawFourNotAllowed
         );
+    }
+
+    #[test]
+    fn draw_eight_matches_color_or_rank_and_skips_target() {
+        let mut game = game();
+        let current = game.current_player().clone();
+        let target = game.players[1].id.clone();
+        let selected = Card::new(Color::Red, Rank::DrawEight);
+        game.active_color = Color::Red;
+        game.discard_pile = vec![Card::new(Color::Red, Rank::Number(3))];
+        game.players[0].hand = vec![selected, Card::new(Color::Blue, Rank::Number(1))];
+        let before = game.hand_for(&target).unwrap().len();
+
+        game.apply_action(
+            &current,
+            Action::Play {
+                card: selected,
+                chosen_color: None,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(game.hand_for(&target).unwrap().len(), before + 8);
+        assert_eq!(game.current_player(), &current);
+
+        game.active_color = Color::Blue;
+        game.discard_pile = vec![Card::new(Color::Yellow, Rank::DrawEight)];
+        game.players[0].hand = vec![Card::new(Color::Green, Rank::DrawEight)];
+        assert!(game.legal_actions(&current).unwrap().iter().any(|action| {
+            matches!(
+                action,
+                Action::Play {
+                    card: Card {
+                        color: Some(Color::Green),
+                        rank: Rank::DrawEight
+                    },
+                    chosen_color: None
+                }
+            )
+        }));
+    }
+
+    #[test]
+    fn wild_draw_sixteen_is_unrestricted_and_changes_color() {
+        let mut game = game();
+        let current = game.current_player().clone();
+        let target = game.players[1].id.clone();
+        let wild = Card::wild(Rank::WildDrawSixteen);
+        game.active_color = Color::Red;
+        game.discard_pile = vec![Card::new(Color::Red, Rank::Number(4))];
+        game.players[0].hand = vec![
+            Card::new(Color::Red, Rank::Number(7)),
+            wild,
+            Card::new(Color::Blue, Rank::Number(2)),
+        ];
+        let before = game.hand_for(&target).unwrap().len();
+
+        assert_eq!(
+            game.apply_action(
+                &current,
+                Action::Play {
+                    card: wild,
+                    chosen_color: None,
+                },
+            )
+            .unwrap_err(),
+            GameError::MissingColorChoice
+        );
+        game.apply_action(
+            &current,
+            Action::Play {
+                card: wild,
+                chosen_color: Some(Color::Green),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(game.active_color, Color::Green);
+        assert_eq!(game.hand_for(&target).unwrap().len(), before + 16);
+        assert_eq!(game.current_player(), &current);
+    }
+
+    #[test]
+    fn large_penalty_draws_all_available_cards_without_failing() {
+        let mut game = game();
+        let current = game.current_player().clone();
+        let target = game.players[1].id.clone();
+        let wild = Card::wild(Rank::WildDrawSixteen);
+        game.active_color = Color::Red;
+        game.discard_pile = vec![Card::new(Color::Red, Rank::Number(4))];
+        game.draw_pile = vec![
+            Card::new(Color::Yellow, Rank::Number(1)),
+            Card::new(Color::Yellow, Rank::Number(2)),
+            Card::new(Color::Yellow, Rank::Number(3)),
+        ];
+        game.players[0].hand = vec![wild, Card::new(Color::Blue, Rank::Number(2))];
+        let before = game.hand_for(&target).unwrap().len();
+
+        game.apply_action(
+            &current,
+            Action::Play {
+                card: wild,
+                chosen_color: Some(Color::Blue),
+            },
+        )
+        .unwrap();
+
+        // The old discard top also becomes recyclable after the three draw-pile cards.
+        assert_eq!(game.hand_for(&target).unwrap().len(), before + 4);
+        assert!(game.draw_pile.is_empty());
+        assert_eq!(game.discard_pile, vec![wild]);
+        assert_eq!(game.current_player(), &current);
+    }
+
+    #[test]
+    fn final_holiday_card_wins_without_penalty() {
+        let mut game = game();
+        let current = game.current_player().clone();
+        let target = game.players[1].id.clone();
+        let wild = Card::wild(Rank::WildDrawSixteen);
+        game.players[0].hand = vec![wild];
+        let before = game.hand_for(&target).unwrap().len();
+
+        game.apply_action(
+            &current,
+            Action::Play {
+                card: wild,
+                chosen_color: Some(Color::Yellow),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(game.public_state().winner, Some(current));
+        assert_eq!(game.hand_for(&target).unwrap().len(), before);
     }
 
     #[test]

@@ -1,5 +1,9 @@
+//! * STAR CARNIVAL WORDS *
+//!
+//! English and Chinese labels for every table and Holiday card.
+
 use crate::ai::Difficulty;
-use crate::core::{Card, Color, Direction, GameError, Rank};
+use crate::core::{Card, Color, DeckVariant, Direction, GameError, Rank};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Language {
@@ -26,11 +30,12 @@ impl Language {
 
     pub fn text(self, message: Message) -> &'static str {
         let (english, chinese) = match message {
-            Message::Title => ("UNO · Local AI", "UNO · 本地 AI"),
+            Message::Title => ("* UNO STAR CARNIVAL *", "* UNO 星光嘉年华 *"),
             Message::Setup => ("New local match", "新建本地对局"),
             Message::PlayerName => ("Player name", "玩家名称"),
             Message::Bots => ("AI opponents", "电脑玩家"),
             Message::Difficulty => ("Difficulty", "难度"),
+            Message::Deck => ("Deck", "牌组"),
             Message::Start => ("Start match", "开始游戏"),
             Message::SetupHint => (
                 "↑/↓ field  ←/→ value  type name  Enter start  Esc quit",
@@ -56,8 +61,8 @@ impl Language {
             ),
             Message::Help => ("Help", "帮助"),
             Message::HelpBody => (
-                "Shortcuts\n  ←/→ select card   Enter play\n  D draw             P pass\n  : command          Q quit\n\nCommands\n  play <index>  draw  pass\n  help          new   quit\n\nPress ? or Esc to return.",
-                "快捷键\n  ←/→ 选择手牌       Enter 出牌\n  D 摸牌             P 跳过\n  : 输入命令         Q 退出\n\n命令\n  play <序号>   draw  pass\n  help          new   quit\n\n按 ? 或 Esc 返回。",
+                "* STAR CARNIVAL *\n\nShortcuts\n  ←/→ select card   Enter play\n  D draw             P pass\n  : command          Q quit\n\nHoliday\n  +8 matches color/rank\n  WILD +16 changes color\n\nCommands\n  play <index>  draw  pass\n  help          new   quit\n\nPress ? or Esc to return.",
+                "* 星光嘉年华 *\n\n快捷键\n  ←/→ 选择手牌       Enter 出牌\n  D 摸牌             P 跳过\n  : 输入命令         Q 退出\n\n节日牌\n  +8 匹配颜色或牌面\n  变色 +16 可改变颜色\n\n命令\n  play <序号>   draw  pass\n  help          new   quit\n\n按 ? 或 Esc 返回。",
             ),
             Message::QuitTitle => ("Leave match?", "退出对局？"),
             Message::QuitBody => ("Y confirm · N/Esc cancel", "Y 确认 · N/Esc 取消"),
@@ -94,6 +99,15 @@ impl Language {
         })
     }
 
+    pub fn deck_variant(self, variant: DeckVariant) -> &'static str {
+        match (self, variant) {
+            (Self::English, DeckVariant::Standard) => "Standard 108",
+            (Self::English, DeckVariant::Holiday) => "Holiday 118",
+            (Self::Chinese, DeckVariant::Standard) => "标准 108",
+            (Self::Chinese, DeckVariant::Holiday) => "节日 118",
+        }
+    }
+
     pub fn direction(self, direction: Direction) -> &'static str {
         self.text(match direction {
             Direction::Clockwise => Message::Clockwise,
@@ -121,13 +135,17 @@ impl Language {
             (Self::English, Rank::Skip) => "SKIP".to_owned(),
             (Self::English, Rank::Reverse) => "REV".to_owned(),
             (Self::English, Rank::DrawTwo) => "+2".to_owned(),
+            (Self::English, Rank::DrawEight) => "* +8 *".to_owned(),
             (Self::English, Rank::Wild) => "WILD".to_owned(),
             (Self::English, Rank::WildDrawFour) => "WILD +4".to_owned(),
+            (Self::English, Rank::WildDrawSixteen) => "< WILD +16 >".to_owned(),
             (Self::Chinese, Rank::Skip) => "禁".to_owned(),
             (Self::Chinese, Rank::Reverse) => "转".to_owned(),
             (Self::Chinese, Rank::DrawTwo) => "+2".to_owned(),
+            (Self::Chinese, Rank::DrawEight) => "* +8 *".to_owned(),
             (Self::Chinese, Rank::Wild) => "变色".to_owned(),
             (Self::Chinese, Rank::WildDrawFour) => "变色 +4".to_owned(),
+            (Self::Chinese, Rank::WildDrawSixteen) => "< 变色 +16 >".to_owned(),
         };
         if card.is_wild() {
             rank
@@ -190,6 +208,7 @@ pub enum Message {
     PlayerName,
     Bots,
     Difficulty,
+    Deck,
     Start,
     SetupHint,
     Opponents,
