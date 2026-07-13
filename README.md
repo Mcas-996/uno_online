@@ -32,6 +32,20 @@ After installation, start the game with:
 uno
 ```
 
+## Updating
+
+Installations created by the shell or PowerShell installer include an updater. Run:
+
+```console
+uno-update
+```
+
+The updater checks GitHub Releases and installs a newer version when one is available.
+
+## Distribution
+
+Release artifacts and installers are built with [cargo-dist](https://github.com/axodotdev/cargo-dist). The `uno-update` command is provided by [axoupdater](https://github.com/axodotdev/axoupdater).
+
 ## License
 
 This project is licensed under the [GNU Affero General Public License v3.0 only](LICENSE).
