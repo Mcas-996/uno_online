@@ -28,7 +28,7 @@ curl --proto '=https' --tlsv1.2 -LsSf https://github.com/Mcas-996/uno_online/rel
 powershell -ExecutionPolicy Bypass -c "irm https://github.com/Mcas-996/uno_online/releases/download/v0.5.0-rc/uno-installer.ps1 | iex"
 ```
 
-安装完成后运行：
+After installation, start the game with:
 
 ```console
 uno
@@ -36,4 +36,4 @@ uno
 
 ## License
 
-本项目基于 [GNU Affero General Public License v3.0 only](LICENSE) 发布。
+This project is licensed under the [GNU Affero General Public License v3.0 only](LICENSE).
