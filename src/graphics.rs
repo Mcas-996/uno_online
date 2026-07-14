@@ -238,7 +238,10 @@ impl GraphicsRuntime {
             .picker
             .as_ref()
             .expect("image backend retains picker")
-            .new_protocol(image, key.size, Resize::Fit(None))?;
+            // Use the preview panel even when the generated art's natural
+            // cell size is smaller on a high-DPI terminal. `Fit` only
+            // shrinks; `Scale` can also grow while preserving aspect ratio.
+            .new_protocol(image, key.size, Resize::Scale(None))?;
         let cached = Some(CachedProtocol { key, protocol });
         match slot {
             PreviewSlot::Selected => self.selected = cached,
@@ -374,5 +377,21 @@ mod tests {
                 .is_some()
         );
         assert_eq!(runtime.encodes, 4);
+    }
+
+    #[test]
+    fn preview_scales_up_to_use_available_panel_height() {
+        use crate::core::{Color, Rank};
+
+        let mut runtime = GraphicsRuntime::with_protocol_for_tests(ProtocolType::Iterm2);
+        let card = Card::new(Color::Green, Rank::Number(2));
+        let available = Size::new(80, 20);
+
+        let protocol = runtime
+            .protocol(PreviewSlot::Selected, card, available)
+            .expect("iTerm2 protocol");
+
+        assert_eq!(protocol.size().height, available.height);
+        assert!(protocol.size().width < available.width);
     }
 }
