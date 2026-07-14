@@ -637,23 +637,26 @@ fn render_card_preview(
     area: Rect,
     app: &App,
 ) {
-    let size = ratatui::layout::Size::new(area.width, area.height);
-    if let Some(protocol) = graphics.protocol(slot, card, size) {
-        let image_area = centered_image_area(area, protocol.size());
-        frame.render_widget(Image::new(protocol), image_area);
-    } else {
-        // 协议不可用或编码失败时仍展示可玩的文字牌面。
-        frame.render_widget(
-            Paragraph::new(app.language.card(card)).alignment(Alignment::Center),
-            area,
-        );
+    let available = ratatui::layout::Size::new(area.width, area.height);
+    if let Some(image_size) = graphics.fit_size(card, available) {
+        let image_area = centered_image_area(area, image_size);
+        if let Some(protocol) = graphics.protocol(slot, card, image_area) {
+            frame.render_widget(Image::new(protocol), image_area);
+            return;
+        }
     }
+
+    // 协议不可用或编码失败时仍展示可玩的文字牌面。
+    frame.render_widget(
+        Paragraph::new(app.language.card(card)).alignment(Alignment::Center),
+        area,
+    );
 }
 
-/// 将协议实际生成的图像尺寸限制并居中到面板内部。
+/// 将 graphics 返回的拟合图像尺寸限制并居中到面板内部。
 fn centered_image_area(area: Rect, image_size: ratatui::layout::Size) -> Rect {
-    // protocol.size() 是编码器在保持宽高比后选出的单元格尺寸，并不保证
-    // 填满请求区域；先限制到父区域，再用剩余空间的一半计算居中偏移。
+    // 拟合尺寸保持牌面比例且不保证填满请求区域；先限制到父区域，再用
+    // 剩余空间的一半计算居中偏移。
     let width = image_size.width.min(area.width);
     let height = image_size.height.min(area.height);
     Rect::new(
@@ -1017,6 +1020,51 @@ mod tests {
             .unwrap();
         assert_eq!(graphics.cached_preview_count(), 0);
         assert!(contents(&terminal).contains("Help"));
+    }
+
+    #[test]
+    fn fitted_selected_and_discard_rectangles_are_centered_inside_their_panels() {
+        use ratatui_image::picker::ProtocolType;
+
+        let table = Rect::new(0, 6, 100, 9);
+        let columns = Layout::default()
+            .direction(LayoutDirection::Horizontal)
+            .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+            .split(table);
+        let panels = [
+            carnival_block("Selected").inner(columns[0]),
+            carnival_block("Discard").inner(columns[1]),
+        ];
+        let cards = [
+            Card::new(Color::Blue, Rank::Number(7)),
+            Card::new(Color::Red, Rank::DrawTwo),
+        ];
+        let mut graphics = GraphicsRuntime::with_protocol_for_tests(ProtocolType::Iterm2);
+
+        let image_rects = panels
+            .into_iter()
+            .zip(cards)
+            .map(|(panel, card)| {
+                let fitted = graphics
+                    .fit_size(card, panel.as_size())
+                    .expect("image backend should fit each preview");
+                let image = centered_image_area(panel, fitted);
+                assert!(image.x >= panel.x);
+                assert!(image.y >= panel.y);
+                assert!(image.right() <= panel.right());
+                assert!(image.bottom() <= panel.bottom());
+
+                let left_gap = image.x - panel.x;
+                let right_gap = panel.right() - image.right();
+                let top_gap = image.y - panel.y;
+                let bottom_gap = panel.bottom() - image.bottom();
+                assert!(left_gap.abs_diff(right_gap) <= 1);
+                assert!(top_gap.abs_diff(bottom_gap) <= 1);
+                image
+            })
+            .collect::<Vec<_>>();
+
+        assert_ne!(image_rects[0].x, image_rects[1].x);
     }
 
     #[test]
