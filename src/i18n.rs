@@ -132,7 +132,13 @@ impl Language {
         }
     }
 
+    /// 生成人类可读的图形设置摘要。
+    ///
+    /// `choice` 表示用户偏好，`backend` 表示环境探测后的实际结果；两者分开
+    /// 传入，使自动降级不会被错误描述为用户主动选择文字模式。
     pub fn graphics(self, choice: GraphicsChoice, backend: GraphicsBackend) -> String {
+        // 设置页同时展示用户选择与实际后端；自动模式降级时保留具体原因，
+        // 便于用户判断是环境限制还是运行时编码错误。
         match (self, choice, backend) {
             (Self::English, GraphicsChoice::Text, _) => "Text (manual)".to_owned(),
             (Self::Chinese, GraphicsChoice::Text, _) => "文字（手动）".to_owned(),

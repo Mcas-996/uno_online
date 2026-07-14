@@ -34,6 +34,7 @@ pub struct Setup {
     pub bot_count: usize,
     pub difficulty: Difficulty,
     pub deck_variant: DeckVariant,
+    /// 用户选择的牌面显示策略；实际协议仍由 `GraphicsRuntime` 根据终端决定。
     pub graphics: GraphicsChoice,
     pub selected: usize,
 }
@@ -246,6 +247,8 @@ impl App {
                 }
             }
             5 => {
+                // 此处只保存 Auto/Text 偏好，不在输入处理阶段探测或切换协议；
+                // UI 每帧通过 GraphicsRuntime 解析实际后端。
                 let index = GraphicsChoice::ALL
                     .iter()
                     .position(|candidate| *candidate == self.setup.graphics)
@@ -270,6 +273,8 @@ impl App {
         match key.code {
             KeyCode::Up | KeyCode::Down => {
                 let row_delta = if key.code == KeyCode::Up { -1 } else { 1 };
+                // 纵向导航必须使用 UI 的实际换行结果，才能在不同终端宽度下
+                // 选择视觉上最接近的上一行或下一行牌。
                 let selected_card = crate::ui::adjacent_hand_card(
                     self.language,
                     self.human_hand().unwrap_or_default(),
