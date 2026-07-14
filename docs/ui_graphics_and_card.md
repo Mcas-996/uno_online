@@ -43,7 +43,7 @@ ui.rs
 
 ### 设置页和游戏页
 
-设置页由标题、选项列表和操作提示三个纵向区域组成。选项数组的顺序必须与 `app::adjust_setup` 使用的字段索引保持一致。图形设置显示的是用户选择与 `effective_backend` 共同决定的实际结果，例如自动探测成功的协议或带原因的文字降级。
+设置页由标题、选项列表和操作提示三个纵向区域组成。选项数组的顺序必须与 `app::adjust_setup` 使用的字段索引保持一致。图形设置显示的是用户选择与 `effective_backend` 共同决定的实际结果，例如 Beta 图像使用的协议或带原因的文字降级。
 
 游戏页使用六个纵向区域：
 
@@ -93,12 +93,12 @@ ui.rs
 
 `GraphicsChoice` 是设置页的策略，目前有：
 
-- `Auto`：使用启动时探测出的可用协议。
-- `Text`：用户强制使用文字牌面。
+- `Text`：使用文字牌面，也是除 Windows Terminal 外的默认选择。
+- `GraphicsBeta`：使用启动时探测出的可用协议，并在设置页标记为 `Graphics (Beta)`。
 
-`GraphicsBackend` 表示实际结果：`Iterm2`、`Sixel`、`Kitty`，或携带 `FallbackReason` 的 `Text`。文字降级原因分为用户手动选择、SSH、安全兼容性不足和运行时编码失败。
+`GraphicsBackend` 表示实际结果：`Iterm2`、`Sixel`、`Kitty`，或携带 `FallbackReason` 的 `Text`。文字结果的原因分为设置页选择 Text（可能是环境默认值）、SSH、安全兼容性不足和运行时编码失败。
 
-`effective_backend` 只在读取时应用用户选择，不覆盖启动探测结果。因此从 `Text` 切回 `Auto` 后，可以恢复已发现的图像协议，无需再次探测。
+`effective_backend` 只在读取时应用用户选择，不覆盖启动探测结果。因此从 `Text` 切到 `GraphicsBeta` 后，可以恢复已发现的图像协议，无需再次探测。
 
 ### 环境识别与后端优先级
 
@@ -107,6 +107,8 @@ ui.rs
 - `SSH_CONNECTION`、`SSH_CLIENT` 或 `SSH_TTY` 非空表示 SSH；
 - `WEZTERM_EXECUTABLE` 或包含 `WezTerm` 的 `TERM_PROGRAM` 表示 WezTerm；
 - `WT_SESSION` 表示 Windows Terminal。
+
+`default_graphics_choice` 在 SSH 或 WezTerm 中返回 `Text`；其他环境只有检测到 Windows Terminal 时返回 `GraphicsBeta`。因此原生 Windows Terminal 和 WSL 默认启用 Beta，而继承了 `WT_SESSION` 的 WezTerm、普通 Windows 终端、Linux 和 macOS 默认使用 Text。
 
 `GraphicsRuntime::detect` 每次启动只执行一次。SSH 会跳过可能向终端发送查询序列的 `Picker::from_query_stdio`，直接安全降级。`resolve_backend` 的判断优先级如下：
 
@@ -209,7 +211,8 @@ HashMap<Card, DynamicImage>                一级：固定尺寸 RGBA 原图
 
 - 小窗口、文字与图像布局不会越界；
 - 手牌换行、滚动和上下导航一致；
-- 后端选择遵守 SSH、WezTerm 和 Windows Terminal 优先级；
+- 默认选择遵守 SSH、WezTerm 和 Windows Terminal 优先级，且 WSL 中的 Windows Terminal 默认启用 Beta；
+- 后端选择继续遵守 SSH、WezTerm 和 Windows Terminal 的协议约束；
 - 两个预览的拟合与居中矩形始终位于各自面板内；
 - 相同槽位、牌面和矩形能够复用协议，牌面、原点或尺寸变化时会重新编码；
 - WezTerm 的绝对锚点、下一单元格恢复、槽位独立性和异常降级符合契约；

@@ -17,22 +17,22 @@ use crate::core::Card;
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 /// 用户对牌面显示方式的选择。
 pub enum GraphicsChoice {
-    /// 自动探测并使用受支持的终端图像协议。
-    #[default]
-    Auto,
     /// 无条件使用文字牌面。
+    #[default]
     Text,
+    /// 使用启动时探测到的受支持图像协议；该功能仍处于 Beta 阶段。
+    GraphicsBeta,
 }
 
 impl GraphicsChoice {
     /// 设置页按此顺序循环切换图形选项。
-    pub const ALL: [Self; 2] = [Self::Auto, Self::Text];
+    pub const ALL: [Self; 2] = [Self::Text, Self::GraphicsBeta];
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 /// 图像模式退回文字模式的原因。
 pub enum FallbackReason {
-    /// 用户在设置页主动选择了文字模式。
+    /// 设置页当前选择文字模式；该选项可能来自环境默认值或用户操作。
     Manual,
     /// SSH 环境中禁用图像协议，以免探测或转义序列影响远端会话。
     Ssh,
@@ -84,6 +84,18 @@ impl TerminalEnvironment {
                 .any(present),
             is_wezterm: present("WEZTERM_EXECUTABLE") || term_program.contains("WezTerm"),
             is_windows_terminal: present("WT_SESSION"),
+        }
+    }
+
+    /// 根据终端环境决定设置页的初始图形选项。
+    ///
+    /// Windows Terminal（包括 WSL）是唯一默认启用 Beta 图像的环境；
+    /// SSH 和 WezTerm 优先使用文字，避免继承的 `WT_SESSION` 造成误判。
+    pub fn default_graphics_choice(self) -> GraphicsChoice {
+        if !self.is_ssh && !self.is_wezterm && self.is_windows_terminal {
+            GraphicsChoice::GraphicsBeta
+        } else {
+            GraphicsChoice::Text
         }
     }
 }
@@ -242,13 +254,18 @@ impl GraphicsRuntime {
 
     /// 应用用户设置后返回本帧应展示的实际后端。
     pub fn effective_backend(&self, choice: GraphicsChoice) -> GraphicsBackend {
-        // 手动选择只覆盖展示结果，不改写探测结果；用户切回 Auto 时仍可恢复
-        // 启动时发现的图像后端。
+        // 文字选择只覆盖展示结果，不改写探测结果；用户切回 Graphics Beta
+        // 时仍可恢复启动时发现的图像后端。
         if choice == GraphicsChoice::Text {
             GraphicsBackend::Text(FallbackReason::Manual)
         } else {
             self.detected_backend
         }
+    }
+
+    /// 返回当前环境推荐的启动选项，不受协议探测成功与否影响。
+    pub fn default_choice(&self) -> GraphicsChoice {
+        self.environment.default_graphics_choice()
     }
 
     /// 释放所有位置相关的协议数据，但保留可复用的原始牌面位图。
@@ -426,6 +443,74 @@ fn absolute_cursor_position(x: u16, y: u16) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_local_windows_terminal_defaults_to_graphics_beta() {
+        let windows_terminal = TerminalEnvironment {
+            is_windows_terminal: true,
+            ..TerminalEnvironment::default()
+        };
+        assert_eq!(
+            windows_terminal.default_graphics_choice(),
+            GraphicsChoice::GraphicsBeta
+        );
+
+        // WSL exposes the same terminal marker, so it follows the same policy
+        // without depending on the Rust compile target.
+        let wsl_in_windows_terminal = windows_terminal;
+        assert_eq!(
+            wsl_in_windows_terminal.default_graphics_choice(),
+            GraphicsChoice::GraphicsBeta
+        );
+
+        assert_eq!(
+            TerminalEnvironment::default().default_graphics_choice(),
+            GraphicsChoice::Text
+        );
+        assert_eq!(
+            TerminalEnvironment {
+                is_wezterm: true,
+                ..TerminalEnvironment::default()
+            }
+            .default_graphics_choice(),
+            GraphicsChoice::Text
+        );
+    }
+
+    #[test]
+    fn ssh_and_wezterm_override_inherited_windows_terminal_default() {
+        for environment in [
+            TerminalEnvironment {
+                is_ssh: true,
+                is_wezterm: false,
+                is_windows_terminal: true,
+            },
+            TerminalEnvironment {
+                is_ssh: false,
+                is_wezterm: true,
+                is_windows_terminal: true,
+            },
+        ] {
+            assert_eq!(environment.default_graphics_choice(), GraphicsChoice::Text);
+        }
+    }
+
+    #[test]
+    fn text_default_can_opt_into_a_detected_local_backend() {
+        let mut picker = Picker::halfblocks();
+        picker.set_protocol_type(ProtocolType::Kitty);
+        let runtime = GraphicsRuntime::from_picker(TerminalEnvironment::default(), Some(picker));
+
+        assert_eq!(runtime.default_choice(), GraphicsChoice::Text);
+        assert_eq!(
+            runtime.effective_backend(GraphicsChoice::Text),
+            GraphicsBackend::Text(FallbackReason::Manual)
+        );
+        assert_eq!(
+            runtime.effective_backend(GraphicsChoice::GraphicsBeta),
+            GraphicsBackend::Kitty
+        );
+    }
 
     #[test]
     fn ssh_always_wins_and_skips_agent_only_false_positive() {

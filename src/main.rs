@@ -86,7 +86,7 @@ fn run_tui() -> io::Result<()> {
     // 图形能力只在启动时探测一次，编码后的预览由运行时跨帧复用。
     let mut graphics = GraphicsRuntime::detect();
     terminal.clear()?;
-    let mut app = App::new(Language::detect());
+    let mut app = App::with_graphics(Language::detect(), graphics.default_choice());
 
     while !app.should_exit {
         // UI 读取应用状态，并通过可变图形运行时按需创建或释放预览协议。

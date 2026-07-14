@@ -938,7 +938,26 @@ mod tests {
         draw_text(&mut terminal, &app);
 
         assert!(contents(&terminal).contains("Language: English"));
-        assert!(contents(&terminal).contains("Graphics: Auto (Text: unsupported)"));
+        assert!(contents(&terminal).contains("Graphics: Text"));
+    }
+
+    #[test]
+    fn setup_reports_graphics_beta_backend() {
+        use ratatui_image::picker::ProtocolType;
+
+        let backend = TestBackend::new(100, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let app = App::with_graphics(
+            Language::English,
+            crate::graphics::GraphicsChoice::GraphicsBeta,
+        );
+        let mut graphics = GraphicsRuntime::with_protocol_for_tests(ProtocolType::Sixel);
+
+        terminal
+            .draw(|frame| render(frame, &app, &mut graphics))
+            .unwrap();
+
+        assert!(contents(&terminal).contains("Graphics: Graphics (Beta) (Sixel)"));
     }
 
     #[test]
@@ -981,7 +1000,10 @@ mod tests {
 
         let backend = TestBackend::new(100, 25);
         let mut terminal = Terminal::new(backend).unwrap();
-        let mut app = App::new(Language::English);
+        let mut app = App::with_graphics(
+            Language::English,
+            crate::graphics::GraphicsChoice::GraphicsBeta,
+        );
         app.setup.bot_count = 1;
         app.start_match().unwrap();
         let mut graphics = GraphicsRuntime::with_protocol_for_tests(ProtocolType::Iterm2);
