@@ -33,6 +33,12 @@ After installation, start the game with:
 uno
 ```
 
+## Terminal Card Graphics
+
+Card previews are enabled automatically on local terminals with a supported image protocol when the window is at least 70 × 26 cells. Windows WezTerm uses iTerm2 inline images, while Windows Terminal 1.22 or newer uses Sixel. Smaller windows, unsupported terminals, explicit Text mode, and every detected SSH session retain the fully playable colored text cards.
+
+The setup screen shows the resolved graphics backend. Choose `Graphics: Text` there to disable image output for the current run.
+
 ## Updating
 
 Installations created by the shell or PowerShell installer include an updater. Run:
