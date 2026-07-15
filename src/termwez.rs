@@ -5,13 +5,15 @@ use std::io::Cursor;
 use std::sync::Arc;
 use std::time::Duration;
 
-use termwiz::caps::Capabilities;
+use termwiz::caps::{Capabilities, ProbeHints};
 use termwiz::cell::{AttributeChange, Intensity};
 use termwiz::color::ColorAttribute;
 use termwiz::image::{ImageData, ImageDataType, TextureCoordinate};
 use termwiz::input::{InputEvent, KeyCode as TwKeyCode, Modifiers};
+#[cfg(test)]
+use termwiz::surface::Surface;
 use termwiz::surface::change::{Change, Image};
-use termwiz::surface::{CursorVisibility, Position, Surface};
+use termwiz::surface::{CursorVisibility, Position};
 use termwiz::terminal::buffered::BufferedTerminal;
 use termwiz::terminal::{Terminal, new_terminal};
 
@@ -24,7 +26,7 @@ use crate::frontend::{
 use crate::screen::{Canvas, Style, UiColor};
 
 pub fn run(app: &mut App) -> Result<(), String> {
-    let caps = Capabilities::new_from_env().map_err(|error| error.to_string())?;
+    let caps = wezterm_capabilities()?;
     let images_available = caps.iterm2_image();
     let terminal = new_terminal(caps).map_err(|error| error.to_string())?;
     let mut terminal = BufferedTerminal::new(terminal).map_err(|error| error.to_string())?;
@@ -42,8 +44,11 @@ pub fn run(app: &mut App) -> Result<(), String> {
         GraphicsChoice::Text
     };
     let result = run_loop(app, &mut terminal, images_available);
-    let _ = terminal.add_change(Change::ClearScreen(ColorAttribute::Default));
-    let _ = terminal.flush();
+    let _ = terminal.terminal().render(&[
+        Change::ClearScreen(ColorAttribute::Default),
+        Change::CursorVisibility(CursorVisibility::Visible),
+    ]);
+    let _ = terminal.terminal().flush();
     let _ = terminal.terminal().exit_alternate_screen();
     let _ = terminal.terminal().set_cooked_mode();
     result
@@ -74,21 +79,35 @@ fn run_loop<T: Terminal>(
         };
         let canvas = crate::screen::render(app, backend, viewport);
         if previous.as_ref() != Some(&canvas) {
-            if apply_canvas(&mut *terminal, &canvas, &mut images).is_err() {
-                images_available = false;
-                images.clear();
-                let text = crate::screen::render(
-                    app,
-                    GraphicsBackend::Text(FallbackReason::Encoding),
-                    viewport,
-                );
-                apply_canvas(&mut *terminal, &text, &mut images)
-                    .map_err(|error| error.to_string())?;
-                previous = Some(text);
-            } else {
-                previous = Some(canvas);
-            }
-            terminal.flush().map_err(|error| error.to_string())?;
+            let changes = match canvas_changes(&canvas, &mut images) {
+                Ok(changes) => {
+                    previous = Some(canvas);
+                    changes
+                }
+                Err(_) => {
+                    images_available = false;
+                    images.clear();
+                    let text = crate::screen::render(
+                        app,
+                        GraphicsBackend::Text(FallbackReason::Encoding),
+                        viewport,
+                    );
+                    let changes =
+                        canvas_changes(&text, &mut images).map_err(|error| error.to_string())?;
+                    previous = Some(text);
+                    changes
+                }
+            };
+            // Surface full repaint cannot reconstruct Change::Image. Render
+            // the original changes through the VT-capable Termwiz terminal.
+            terminal
+                .terminal()
+                .render(&changes)
+                .map_err(|error| error.to_string())?;
+            terminal
+                .terminal()
+                .flush()
+                .map_err(|error| error.to_string())?;
         }
         match terminal
             .terminal()
@@ -104,13 +123,35 @@ fn run_loop<T: Terminal>(
     Ok(())
 }
 
-fn apply_canvas(
-    terminal: &mut Surface,
+fn wezterm_capabilities() -> Result<Capabilities, String> {
+    // TERM is commonly `dumb` in native Windows WezTerm sessions. Giving
+    // Termwiz a minimal xterm-compatible database both selects its VT
+    // renderer and avoids its no-terminfo x/y fallback bug.
+    let mut database = terminfo::Database::new();
+    database
+        .name("uno-wezterm")
+        .description("Minimal WezTerm VT capabilities")
+        .raw("cursor_address", b"\x1b[%i%p1%d;%p2%dH".as_slice());
+    let database = database
+        .build()
+        .map_err(|_| "failed to build WezTerm capabilities".to_owned())?;
+    Capabilities::new_with_hints(
+        ProbeHints::new_from_env()
+            .term_program(Some("WezTerm".to_owned()))
+            .iterm2_image(Some(true))
+            .terminfo_db(Some(database)),
+    )
+    .map_err(|error| error.to_string())
+}
+
+fn canvas_changes(
     canvas: &Canvas,
     cache: &mut HashMap<Card, Arc<ImageData>>,
-) -> termwiz::Result<()> {
-    terminal.add_change(Change::ClearScreen(ColorAttribute::Default));
-    terminal.add_change(Change::CursorVisibility(CursorVisibility::Hidden));
+) -> termwiz::Result<Vec<Change>> {
+    let mut changes = vec![
+        Change::ClearScreen(ColorAttribute::Default),
+        Change::CursorVisibility(CursorVisibility::Hidden),
+    ];
     let mut previous_style = None;
     for y in 0..canvas.height {
         for x in 0..canvas.width {
@@ -119,14 +160,14 @@ fn apply_canvas(
                 continue;
             }
             if previous_style != Some(cell.style) {
-                add_style(terminal, cell.style);
+                add_style(&mut changes, cell.style);
                 previous_style = Some(cell.style);
             }
-            terminal.add_change(Change::CursorPosition {
+            changes.push(Change::CursorPosition {
                 x: Position::Absolute(usize::from(x)),
                 y: Position::Absolute(usize::from(y)),
             });
-            terminal.add_change(Change::Text(cell.symbol.to_string()));
+            changes.push(Change::Text(cell.symbol.to_string()));
         }
     }
     for placement in &canvas.images {
@@ -144,11 +185,11 @@ fn apply_canvas(
                 data
             }
         };
-        terminal.add_change(Change::CursorPosition {
+        changes.push(Change::CursorPosition {
             x: Position::Absolute(usize::from(placement.rect.x)),
             y: Position::Absolute(usize::from(placement.rect.y)),
         });
-        terminal.add_change(Change::Image(Image {
+        changes.push(Change::Image(Image {
             width: usize::from(placement.rect.width),
             height: usize::from(placement.rect.height),
             top_left: TextureCoordinate::new_f32(0.0, 0.0),
@@ -156,17 +197,17 @@ fn apply_canvas(
             image: data,
         }));
     }
-    Ok(())
+    Ok(changes)
 }
 
-fn add_style(terminal: &mut Surface, style: Style) {
-    terminal.add_change(Change::Attribute(AttributeChange::Foreground(tw_color(
+fn add_style(changes: &mut Vec<Change>, style: Style) {
+    changes.push(Change::Attribute(AttributeChange::Foreground(tw_color(
         style.fg,
     ))));
-    terminal.add_change(Change::Attribute(AttributeChange::Background(tw_color(
+    changes.push(Change::Attribute(AttributeChange::Background(tw_color(
         style.bg,
     ))));
-    terminal.add_change(Change::Attribute(AttributeChange::Intensity(
+    changes.push(Change::Attribute(AttributeChange::Intensity(
         if style.bold {
             Intensity::Bold
         } else {
@@ -215,6 +256,29 @@ fn convert_key(key: termwiz::input::KeyEvent) -> KeyEvent {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{self, Write};
+    use termwiz::render::RenderTty;
+    use termwiz::render::terminfo::TerminfoRenderer;
+
+    #[derive(Default)]
+    struct TestTty(Vec<u8>);
+
+    impl Write for TestTty {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.0.extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl RenderTty for TestTty {
+        fn get_size_in_cells(&mut self) -> termwiz::Result<(usize, usize)> {
+            Ok((80, 28))
+        }
+    }
 
     #[test]
     fn png_is_kept_as_encoded_file_for_termwiz_renderer() {
@@ -244,8 +308,16 @@ mod tests {
             },
         );
         assert_eq!(canvas.images.len(), 2);
+        let changes = canvas_changes(&canvas, &mut HashMap::new()).unwrap();
+        assert_eq!(
+            changes
+                .iter()
+                .filter(|change| matches!(change, Change::Image(_)))
+                .count(),
+            2
+        );
         let mut surface = Surface::new(80, 28);
-        apply_canvas(&mut surface, &canvas, &mut HashMap::new()).unwrap();
+        surface.add_changes(changes);
         let image_cells = surface
             .screen_cells()
             .into_iter()
@@ -255,5 +327,49 @@ mod tests {
             .collect::<Vec<_>>();
         assert!(!image_cells.is_empty());
         assert!(image_cells.iter().all(|image| matches!(&*image.image_data().data(), ImageDataType::EncodedFile(bytes) if bytes.starts_with(b"\x89PNG"))));
+    }
+
+    #[test]
+    fn original_change_stream_reaches_termwiz_image_renderer() {
+        let card = Card::new(crate::core::Color::Blue, crate::core::Rank::Number(7));
+        let canvas = Canvas {
+            width: 1,
+            height: 1,
+            cells: vec![crate::screen::Cell::default()],
+            images: vec![crate::screen::ImagePlacement {
+                slot: crate::screen::ImageSlot::Discard,
+                card,
+                rect: crate::screen::Rect {
+                    x: 0,
+                    y: 0,
+                    width: 1,
+                    height: 1,
+                },
+            }],
+        };
+        let changes = canvas_changes(&canvas, &mut HashMap::new()).unwrap();
+        let caps = wezterm_capabilities().unwrap();
+        let mut renderer = TerminfoRenderer::new(caps);
+        let mut output = TestTty::default();
+        renderer.render_to(&changes, &mut output).unwrap();
+        let rendered = String::from_utf8(output.0).unwrap();
+        assert!(rendered.contains("\u{1b}]1337;File="));
+    }
+
+    #[test]
+    fn wezterm_cursor_address_keeps_rows_and_columns_in_order() {
+        let caps = wezterm_capabilities().unwrap();
+        let mut renderer = TerminfoRenderer::new(caps);
+        let mut output = TestTty::default();
+        renderer
+            .render_to(
+                &[Change::CursorPosition {
+                    x: Position::Absolute(12),
+                    y: Position::Absolute(5),
+                }],
+                &mut output,
+            )
+            .unwrap();
+        assert_eq!(output.0, b"\x1b[6;13H");
     }
 }
