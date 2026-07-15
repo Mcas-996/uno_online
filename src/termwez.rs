@@ -145,6 +145,11 @@ fn wezterm_capabilities() -> Result<Capabilities, String> {
         ProbeHints::new_from_env()
             .term_program(Some("WezTerm".to_owned()))
             .iterm2_image(Some(true))
+            // The UI is keyboard-only. Leaving Termwiz's default mouse
+            // reporting enabled makes WezTerm send SGR mouse sequences that
+            // can be split into character events by the Windows console input
+            // path and leak into the player-name field.
+            .mouse_reporting(Some(false))
             .terminfo_db(Some(database)),
     )
     .map_err(|error| error.to_string())
@@ -422,5 +427,11 @@ mod tests {
             )
             .unwrap();
         assert_eq!(output.0, b"\x1b[6;13H");
+    }
+
+    #[test]
+    fn wezterm_frontend_does_not_enable_unused_mouse_reporting() {
+        let caps = wezterm_capabilities().unwrap();
+        assert!(!caps.mouse_reporting());
     }
 }
