@@ -6,26 +6,25 @@ mod ai;
 mod app;
 mod card_art;
 mod core;
-mod graphics;
+mod environment;
+mod frontend;
 mod i18n;
-mod ui;
+mod screen;
+mod termwez;
 mod uninstall;
+mod universal;
+mod view;
 
 use std::env;
 use std::io::{self, stdout};
-use std::time::Duration;
 
 use app::App;
 use crossterm::cursor::Show;
-use crossterm::event::{self, Event};
 use crossterm::execute;
-use crossterm::terminal::{
-    Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
-};
-use graphics::GraphicsRuntime;
+use crossterm::terminal::{Clear, ClearType, LeaveAlternateScreen, disable_raw_mode};
+use environment::{FrontendKind, TerminalEnvironment};
+use frontend::GraphicsChoice;
 use i18n::Language;
-use ratatui::Terminal;
-use ratatui::backend::CrosstermBackend;
 
 fn main() {
     if let Err(error) = run(env::args().skip(1).collect()) {
@@ -80,31 +79,33 @@ fn print_version() {
 /// 初始化终端、图形运行时和应用状态，并驱动逐帧事件循环。
 fn run_tui() -> io::Result<()> {
     install_panic_restore();
-    let _guard = TerminalGuard::enter()?;
-    let backend = CrosstermBackend::new(stdout());
-    let mut terminal = Terminal::new(backend)?;
-    // 图形能力只在启动时探测一次，编码后的预览由运行时跨帧复用。
-    let mut graphics = GraphicsRuntime::detect();
-    terminal.clear()?;
-    let mut app = App::with_graphics(Language::detect(), graphics.default_choice());
-
-    while !app.should_exit {
-        // UI 读取应用状态，并通过可变图形运行时按需创建或释放预览协议。
-        terminal.draw(|frame| ui::render(frame, &app, &mut graphics))?;
-        // 短轮询让键盘输入保持响应，同时保证没有输入时 AI 计时器仍会推进。
-        if event::poll(Duration::from_millis(50))?
-            && let Event::Key(key) = event::read()?
-        {
-            app.handle_key(key, terminal.size()?.width);
+    let environment = TerminalEnvironment::detect();
+    match environment.frontend() {
+        FrontendKind::UniversalText => {
+            let mut app = App::with_graphics(Language::detect(), GraphicsChoice::Text);
+            let reason = if environment.is_ssh {
+                frontend::FallbackReason::Ssh
+            } else {
+                frontend::FallbackReason::Tmux
+            };
+            universal::run(&mut app, Some(reason))
         }
-        // tick 只推进定时状态（目前是 AI 回合），渲染本身不修改游戏规则。
-        app.tick();
+        FrontendKind::Universal => {
+            let mut app = App::with_graphics(Language::detect(), GraphicsChoice::Text);
+            universal::run(&mut app, None)
+        }
+        FrontendKind::Termwiz => {
+            let mut app = App::with_graphics(Language::detect(), GraphicsChoice::GraphicsBeta);
+            match termwez::run(&mut app) {
+                Ok(()) => Ok(()),
+                Err(_) => {
+                    app.should_exit = false;
+                    app.setup.graphics = GraphicsChoice::Text;
+                    universal::run(&mut app, Some(frontend::FallbackReason::Unsupported))
+                }
+            }
+        }
     }
-    // 在清屏和恢复光标前先丢弃图像协议，防止终端保留牌面预览。
-    graphics.suspend();
-    terminal.clear()?;
-    terminal.show_cursor()?;
-    Ok(())
 }
 
 fn install_panic_restore() {
@@ -113,25 +114,6 @@ fn install_panic_restore() {
         restore_terminal();
         previous(info);
     }));
-}
-
-struct TerminalGuard;
-
-impl TerminalGuard {
-    fn enter() -> io::Result<Self> {
-        enable_raw_mode()?;
-        if let Err(error) = execute!(stdout(), EnterAlternateScreen) {
-            let _ = disable_raw_mode();
-            return Err(error);
-        }
-        Ok(Self)
-    }
-}
-
-impl Drop for TerminalGuard {
-    fn drop(&mut self) {
-        restore_terminal();
-    }
 }
 
 fn restore_terminal() {
