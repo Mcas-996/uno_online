@@ -88,10 +88,58 @@ pub fn choose_action<R: Rng + ?Sized>(
     } else {
         None
     };
+    let swap_target = choose_swap_target(difficulty, state, selected, legal_actions, rng);
     Action::Play {
         card: selected,
         chosen_color,
+        swap_target,
     }
+}
+
+fn choose_swap_target<R: Rng + ?Sized>(
+    difficulty: Difficulty,
+    state: &PublicGameState,
+    selected: Card,
+    legal_actions: &[Action],
+    rng: &mut R,
+) -> Option<crate::core::PlayerId> {
+    let targets = legal_actions
+        .iter()
+        .filter_map(|action| match action {
+            Action::Play {
+                card,
+                swap_target: Some(target),
+                ..
+            } if *card == selected => Some(target.clone()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if targets.is_empty() {
+        return None;
+    }
+    if difficulty == Difficulty::Easy {
+        return Some(targets[rng.gen_range(0..targets.len())].clone());
+    }
+    let minimum = targets
+        .iter()
+        .filter_map(|target| {
+            state
+                .players
+                .iter()
+                .find(|player| player.id == *target)
+                .map(|player| player.hand_len)
+        })
+        .min()?;
+    let best = targets
+        .into_iter()
+        .filter(|target| {
+            state
+                .players
+                .iter()
+                .any(|player| player.id == *target && player.hand_len == minimum)
+        })
+        .collect::<Vec<_>>();
+    Some(best[rng.gen_range(0..best.len())].clone())
 }
 
 fn choose_scored<R: Rng + ?Sized>(
@@ -210,6 +258,7 @@ mod tests {
         Action::Play {
             card,
             chosen_color: card.is_wild().then_some(Color::Red),
+            swap_target: None,
         }
     }
 
@@ -252,6 +301,7 @@ mod tests {
             Action::Play {
                 card: wild,
                 chosen_color: Some(Color::Blue),
+                swap_target: None,
             },
             Action::Draw,
         ];
@@ -287,13 +337,15 @@ mod tests {
         let legal = Color::ALL.map(|color| Action::Play {
             card: wild,
             chosen_color: Some(color),
+            swap_target: None,
         });
         let mut rng = StdRng::seed_from_u64(4);
         assert_eq!(
             choose_action(Difficulty::Normal, &state(6), &hand, &legal, &mut rng),
             Action::Play {
                 card: wild,
-                chosen_color: Some(Color::Blue)
+                chosen_color: Some(Color::Blue),
+                swap_target: None,
             }
         );
     }
@@ -314,6 +366,51 @@ mod tests {
             Action::Play {
                 card: wild_sixteen,
                 chosen_color: Some(Color::Blue),
+                swap_target: None,
+            }
+        );
+    }
+
+    #[test]
+    fn seven_target_selection_respects_difficulty() {
+        let seven = Card::new(Color::Red, Rank::Number(7));
+        let mut state = state(5);
+        state.players.push(PublicPlayerState {
+            id: PlayerId::new("human-2"),
+            name: "Human 2".to_owned(),
+            hand_len: 1,
+        });
+        let legal = [
+            Action::Play {
+                card: seven,
+                chosen_color: None,
+                swap_target: Some(PlayerId::new("human")),
+            },
+            Action::Play {
+                card: seven,
+                chosen_color: None,
+                swap_target: Some(PlayerId::new("human-2")),
+            },
+            Action::Draw,
+        ];
+
+        let mut easy_rng = StdRng::seed_from_u64(12);
+        let easy = choose_action(Difficulty::Easy, &state, &[seven], &legal, &mut easy_rng);
+        assert!(legal.contains(&easy));
+
+        let mut normal_rng = StdRng::seed_from_u64(12);
+        assert_eq!(
+            choose_action(
+                Difficulty::Normal,
+                &state,
+                &[seven],
+                &legal,
+                &mut normal_rng
+            ),
+            Action::Play {
+                card: seven,
+                chosen_color: None,
+                swap_target: Some(PlayerId::new("human-2")),
             }
         );
     }

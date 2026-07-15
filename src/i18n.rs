@@ -42,6 +42,9 @@ impl Language {
             Message::Bots => ("AI opponents", "电脑玩家"),
             Message::Difficulty => ("Difficulty", "难度"),
             Message::Deck => ("Deck", "牌组"),
+            Message::SevenZero => ("7-0 rule", "7-0 规则"),
+            Message::Enabled => ("Enabled", "开启"),
+            Message::Disabled => ("Disabled", "关闭"),
             Message::Language => ("Language", "语言"),
             Message::Graphics => ("Graphics", "图像"),
             Message::Start => ("Start match", "开始游戏"),
@@ -59,14 +62,15 @@ impl Language {
             Message::Direction => ("Direction", "方向"),
             Message::Cards => ("cards", "张牌"),
             Message::ChooseColor => ("Choose a color", "选择颜色"),
+            Message::ChoosePlayer => ("Choose a player", "选择玩家"),
             Message::ColorHint => (
                 "←/→ or h/l choose  Enter confirm  Esc cancel",
                 "←/→ 或 h/l 选择  Enter 确认  Esc 取消",
             ),
             Message::Help => ("Help", "帮助"),
             Message::HelpBody => (
-                "* STAR CARNIVAL *\n\nShortcuts\n  Arrows/hjkl select  Enter play\n  D draw              P pass\n  : command           Q quit\n\nHoliday\n  +8 matches color/rank\n  WILD +16 changes color\n\nCommands\n  play <index>  draw  pass\n  help          new   quit\n\nPress ? or Esc to return.",
-                "* 星光嘉年华 *\n\n快捷键\n  方向键/hjkl 选择手牌  Enter 出牌\n  D 摸牌              P 跳过\n  : 输入命令          Q 退出\n\n节日牌\n  +8 匹配颜色或牌面\n  变色 +16 可改变颜色\n\n命令\n  play <序号>   draw  pass\n  help          new   quit\n\n按 ? 或 Esc 返回。",
+                "* STAR CARNIVAL *\n\nShortcuts\n  Arrows/hjkl select  Enter play\n  D draw              P pass\n  : command           Q quit\n\n7-0 rule\n  7 swaps hands; 0 rotates hands\n\nHoliday\n  +8 matches color/rank\n  WILD +16 changes color\n\nCommands\n  play <index>  draw  pass\n  help          new   quit\n\nPress ? or Esc to return.",
+                "* 星光嘉年华 *\n\n快捷键\n  方向键/hjkl 选择手牌  Enter 出牌\n  D 摸牌              P 跳过\n  : 输入命令          Q 退出\n\n7-0 规则\n  7 交换手牌；0 轮转手牌\n\n节日牌\n  +8 匹配颜色或牌面\n  变色 +16 可改变颜色\n\n命令\n  play <序号>   draw  pass\n  help          new   quit\n\n按 ? 或 Esc 返回。",
             ),
             Message::QuitTitle => ("Leave match?", "退出对局？"),
             Message::QuitBody => ("Y confirm · N/Esc cancel", "Y 确认 · N/Esc 取消"),
@@ -123,10 +127,10 @@ impl Language {
             (Self::English, PlayMode::Single) => self.text(Message::HelpBody),
             (Self::Chinese, PlayMode::Single) => self.text(Message::HelpBody),
             (Self::English, PlayMode::Dual) => {
-                "* STAR CARNIVAL *\n\nTwo-player shortcuts\n  Left:  WASD select\n  Right: arrows/hjkl select\n  Enter play   X draw   P pass\n  : command    Q quit\n\nHoliday\n  +8 matches color/rank\n  WILD +16 changes color\n\nCommands act for the current player.\nPress ? or Esc to return."
+                "* STAR CARNIVAL *\n\nTwo-player shortcuts\n  Left:  WASD select\n  Right: arrows/hjkl select\n  Enter play   X draw   P pass\n  : command    Q quit\n\n7-0 rule\n  7 swaps hands; 0 rotates hands\n\nHoliday\n  +8 matches color/rank\n  WILD +16 changes color\n\nCommands act for the current player.\nPress ? or Esc to return."
             }
             (Self::Chinese, PlayMode::Dual) => {
-                "* 星光嘉年华 *\n\n双人快捷键\n  左侧：WASD 选择手牌\n  右侧：方向键/hjkl 选择手牌\n  Enter 出牌  X 摸牌  P 跳过\n  : 输入命令  Q 退出\n\n节日牌\n  +8 匹配颜色或牌面\n  变色 +16 可改变颜色\n\n命令作用于当前玩家。\n按 ? 或 Esc 返回。"
+                "* 星光嘉年华 *\n\n双人快捷键\n  左侧：WASD 选择手牌\n  右侧：方向键/hjkl 选择手牌\n  Enter 出牌  X 摸牌  P 跳过\n  : command    Q 退出\n\n7-0 规则\n  7 交换手牌；0 轮转手牌\n\n节日牌\n  +8 匹配颜色或牌面\n  变色 +16 可改变颜色\n\n命令作用于当前玩家。\n按 ? 或 Esc 返回。"
             }
         }
     }
@@ -150,6 +154,32 @@ impl Language {
         }
     }
 
+    pub fn target_hint(self, mode: PlayMode, player_index: usize) -> &'static str {
+        self.color_hint(mode, player_index)
+    }
+
+    pub fn enabled(self, enabled: bool) -> &'static str {
+        self.text(if enabled {
+            Message::Enabled
+        } else {
+            Message::Disabled
+        })
+    }
+
+    pub fn swap_log(self, played: &str, target: &str) -> String {
+        match self {
+            Self::English => format!("{played} and swapped hands with {target}"),
+            Self::Chinese => format!("{played}，并与 {target} 交换手牌"),
+        }
+    }
+
+    pub fn rotate_log(self, played: &str, direction: Direction) -> String {
+        match self {
+            Self::English => format!("{played} and rotated hands {}", self.direction(direction)),
+            Self::Chinese => format!("{played}，并按{}轮转手牌", self.direction(direction)),
+        }
+    }
+
     pub fn difficulty(self, difficulty: Difficulty) -> &'static str {
         self.text(match difficulty {
             Difficulty::Easy => Message::Easy,
@@ -161,10 +191,10 @@ impl Language {
 
     pub fn deck_variant(self, variant: DeckVariant) -> &'static str {
         match (self, variant) {
-            (Self::English, DeckVariant::Standard) => "Standard 108",
-            (Self::English, DeckVariant::Holiday) => "Holiday 118",
-            (Self::Chinese, DeckVariant::Standard) => "标准 108",
-            (Self::Chinese, DeckVariant::Holiday) => "节日 118",
+            (Self::English, DeckVariant::Standard) => "Standard 112",
+            (Self::English, DeckVariant::Holiday) => "Holiday 122",
+            (Self::Chinese, DeckVariant::Standard) => "标准 112",
+            (Self::Chinese, DeckVariant::Holiday) => "节日 122",
         }
     }
 
@@ -269,6 +299,18 @@ impl Language {
                 Self::English => "Choose a color",
                 Self::Chinese => "请选择颜色",
             },
+            GameError::MissingSwapTarget => match self {
+                Self::English => "Choose a player to swap hands with",
+                Self::Chinese => "请选择交换手牌的玩家",
+            },
+            GameError::UnexpectedSwapTarget => match self {
+                Self::English => "That card does not accept a swap target",
+                Self::Chinese => "这张牌不能指定换手目标",
+            },
+            GameError::InvalidSwapTarget(_) => match self {
+                Self::English => "Choose another current player",
+                Self::Chinese => "请选择另一名当前玩家",
+            },
             GameError::WildDrawFourNotAllowed => match self {
                 Self::English => "Wild +4 is illegal while you hold the active color",
                 Self::Chinese => "手中有当前颜色时不能出变色 +4",
@@ -308,6 +350,9 @@ pub enum Message {
     Bots,
     Difficulty,
     Deck,
+    SevenZero,
+    Enabled,
+    Disabled,
     Language,
     Graphics,
     Start,
@@ -322,6 +367,7 @@ pub enum Message {
     Direction,
     Cards,
     ChooseColor,
+    ChoosePlayer,
     ColorHint,
     Help,
     HelpBody,
@@ -376,6 +422,14 @@ mod tests {
         assert_eq!(Language::from_locale(None), Language::English);
         assert_eq!(Language::English.difficulty(Difficulty::Extreme), "Extreme");
         assert_eq!(Language::Chinese.difficulty(Difficulty::Extreme), "最难");
+        assert_eq!(
+            Language::English.deck_variant(DeckVariant::Standard),
+            "Standard 112"
+        );
+        assert_eq!(
+            Language::Chinese.deck_variant(DeckVariant::Holiday),
+            "节日 122"
+        );
         assert_eq!(
             Language::English.graphics(GraphicsChoice::GraphicsBeta, GraphicsBackend::Termwiz),
             "Graphics (Beta) (Termwiz)"

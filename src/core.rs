@@ -14,6 +14,17 @@ pub const MAX_PLAYERS: usize = 5;
 pub const STARTING_HAND_SIZE: usize = 7;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct HouseRules {
+    pub seven_zero: bool,
+}
+
+impl Default for HouseRules {
+    fn default() -> Self {
+        Self { seven_zero: true }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PlayerDrawRule {
     ExcludeDrawEightAndSixteen,
     ExcludeDrawSixteen,
@@ -196,9 +207,16 @@ pub enum Action {
     Play {
         card: Card,
         chosen_color: Option<Color>,
+        swap_target: Option<PlayerId>,
     },
     Draw,
     Pass,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum HandEffect {
+    Swap { target: PlayerId },
+    Rotate { direction: Direction },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -208,6 +226,7 @@ pub enum EventKind {
         player: PlayerId,
         card: Card,
         chosen_color: Option<Color>,
+        hand_effect: Option<HandEffect>,
     },
     CardDrawn {
         player: PlayerId,
@@ -249,6 +268,7 @@ pub struct PublicGameState {
 #[derive(Debug)]
 pub struct Game {
     deck_variant: DeckVariant,
+    house_rules: HouseRules,
     players: Vec<Player>,
     draw_pile: Vec<Card>,
     discard_pile: Vec<Card>,
@@ -274,6 +294,9 @@ pub enum GameError {
     DrawnCardOnly(Card),
     MissingColorChoice,
     UnexpectedColorChoice,
+    MissingSwapTarget,
+    UnexpectedSwapTarget,
+    InvalidSwapTarget(PlayerId),
     WildDrawFourNotAllowed,
     InvalidColor(String),
     AlreadyDrew,
@@ -298,6 +321,22 @@ impl Game {
         Self::new_with_rng(
             players,
             deck_variant,
+            HouseRules::default(),
+            BTreeMap::new(),
+            StdRng::from_entropy(),
+            RefillSeedSource::Runtime,
+        )
+    }
+
+    pub fn new_with_house_rules(
+        players: Vec<(PlayerId, String)>,
+        deck_variant: DeckVariant,
+        house_rules: HouseRules,
+    ) -> Result<Self, GameError> {
+        Self::new_with_rng(
+            players,
+            deck_variant,
+            house_rules,
             BTreeMap::new(),
             StdRng::from_entropy(),
             RefillSeedSource::Runtime,
@@ -312,6 +351,23 @@ impl Game {
         Self::new_with_rng(
             players,
             deck_variant,
+            HouseRules::default(),
+            player_draw_rules,
+            StdRng::from_entropy(),
+            RefillSeedSource::Runtime,
+        )
+    }
+
+    pub fn new_with_house_rules_and_draw_rules(
+        players: Vec<(PlayerId, String)>,
+        deck_variant: DeckVariant,
+        house_rules: HouseRules,
+        player_draw_rules: BTreeMap<PlayerId, PlayerDrawRule>,
+    ) -> Result<Self, GameError> {
+        Self::new_with_rng(
+            players,
+            deck_variant,
+            house_rules,
             player_draw_rules,
             StdRng::from_entropy(),
             RefillSeedSource::Runtime,
@@ -327,6 +383,7 @@ impl Game {
         Self::new_with_rng(
             players,
             deck_variant,
+            HouseRules::default(),
             BTreeMap::new(),
             StdRng::seed_from_u64(seed),
             RefillSeedSource::Deterministic,
@@ -343,6 +400,7 @@ impl Game {
         Self::new_with_rng(
             players,
             deck_variant,
+            HouseRules::default(),
             player_draw_rules,
             StdRng::seed_from_u64(seed),
             RefillSeedSource::Deterministic,
@@ -352,6 +410,7 @@ impl Game {
     fn new_with_rng(
         players: Vec<(PlayerId, String)>,
         deck_variant: DeckVariant,
+        house_rules: HouseRules,
         player_draw_rules: BTreeMap<PlayerId, PlayerDrawRule>,
         mut rng: StdRng,
         refill_seed_source: RefillSeedSource,
@@ -398,6 +457,7 @@ impl Game {
         let active_color = first_discard.color.expect("number cards have a color");
         let mut game = Self {
             deck_variant,
+            house_rules,
             players: player_states,
             draw_pile: deck,
             discard_pile: vec![first_discard],
@@ -423,8 +483,23 @@ impl Game {
         self.deck_variant
     }
 
+    pub const fn house_rules(&self) -> HouseRules {
+        self.house_rules
+    }
+
     pub fn hand_for(&self, player: &PlayerId) -> Result<&[Card], GameError> {
         Ok(&self.player(player)?.hand)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_test_turn(&mut self, player: &PlayerId, hand: Vec<Card>, discard_top: Card) {
+        let index = self.player_index(player).expect("test player exists");
+        self.current_index = index;
+        self.players[index].hand = hand;
+        self.active_color = discard_top.color.expect("test discard is colored");
+        self.discard_pile = vec![discard_top];
+        self.phase = TurnPhase::AwaitingAction;
+        self.winner = None;
     }
 
     pub fn public_state(&self) -> PublicGameState {
@@ -473,11 +548,24 @@ impl Game {
                 actions.extend(Color::ALL.map(|chosen_color| Action::Play {
                     card,
                     chosen_color: Some(chosen_color),
+                    swap_target: None,
                 }));
+            } else if self.house_rules.seven_zero && card.rank == Rank::Number(7) {
+                actions.extend(
+                    self.players
+                        .iter()
+                        .filter(|candidate| candidate.id != *player)
+                        .map(|candidate| Action::Play {
+                            card,
+                            chosen_color: None,
+                            swap_target: Some(candidate.id.clone()),
+                        }),
+                );
             } else {
                 actions.push(Action::Play {
                     card,
                     chosen_color: None,
+                    swap_target: None,
                 });
             }
         }
@@ -498,7 +586,11 @@ impl Game {
             return Err(GameError::GameAlreadyWon);
         }
         match action {
-            Action::Play { card, chosen_color } => self.play(player, card, chosen_color),
+            Action::Play {
+                card,
+                chosen_color,
+                swap_target,
+            } => self.play(player, card, chosen_color, swap_target),
             Action::Draw => self.draw(player),
             Action::Pass => self.pass(player),
         }
@@ -509,6 +601,7 @@ impl Game {
         player: &PlayerId,
         card: Card,
         chosen_color: Option<Color>,
+        swap_target: Option<PlayerId>,
     ) -> Result<GameEvent, GameError> {
         if let TurnPhase::Drew(drawn) = self.phase
             && card != drawn
@@ -532,6 +625,15 @@ impl Game {
         }
         if !card.is_wild() && chosen_color.is_some() {
             return Err(GameError::UnexpectedColorChoice);
+        }
+        let requires_swap_target = self.house_rules.seven_zero && card.rank == Rank::Number(7);
+        match (requires_swap_target, swap_target.as_ref()) {
+            (true, None) => return Err(GameError::MissingSwapTarget),
+            (true, Some(target)) if target == player || self.player_index(target).is_err() => {
+                return Err(GameError::InvalidSwapTarget(target.clone()));
+            }
+            (false, Some(_)) => return Err(GameError::UnexpectedSwapTarget),
+            _ => {}
         }
 
         // ===== * NUMBER CARNIVAL * =====
@@ -568,13 +670,14 @@ impl Game {
         self.phase = TurnPhase::AwaitingAction;
 
         let won = self.players[player_index].hand.is_empty();
-        if !won {
-            self.apply_card_effect(card);
-        }
+        let hand_effect = (!won)
+            .then(|| self.apply_card_effect(card, swap_target))
+            .flatten();
         let event = self.push_event(EventKind::CardPlayed {
             player: player.clone(),
             card,
             chosen_color,
+            hand_effect,
         });
         if won {
             self.winner = Some(player.clone());
@@ -612,38 +715,94 @@ impl Game {
 
     // ===== * ACTION CARD FIREWORKS * =====
 
-    fn apply_card_effect(&mut self, card: Card) {
+    fn apply_card_effect(
+        &mut self,
+        card: Card,
+        swap_target: Option<PlayerId>,
+    ) -> Option<HandEffect> {
         match card.rank {
             Rank::Reverse => {
                 self.direction.reverse();
                 self.advance_turn(if self.players.len() == 2 { 2 } else { 1 });
+                None
             }
-            Rank::Skip => self.advance_turn(2),
+            Rank::Skip => {
+                self.advance_turn(2);
+                None
+            }
             Rank::DrawTwo => {
                 self.advance_turn(1);
                 let target = self.current_player().clone();
                 self.draw_available_cards_to_player(&target, 2);
                 self.advance_turn(1);
+                None
             }
             Rank::DrawEight => {
                 self.advance_turn(1);
                 let target = self.current_player().clone();
                 self.draw_available_cards_to_player(&target, 8);
                 self.advance_turn(1);
+                None
             }
             Rank::WildDrawFour => {
                 self.advance_turn(1);
                 let target = self.current_player().clone();
                 self.draw_available_cards_to_player(&target, 4);
                 self.advance_turn(1);
+                None
             }
             Rank::WildDrawSixteen => {
                 self.advance_turn(1);
                 let target = self.current_player().clone();
                 self.draw_available_cards_to_player(&target, 16);
                 self.advance_turn(1);
+                None
             }
-            Rank::Number(_) | Rank::Wild => self.advance_turn(1),
+            Rank::Number(7) if self.house_rules.seven_zero => {
+                let target = swap_target.expect("validated seven target");
+                let target_index = self
+                    .player_index(&target)
+                    .expect("validated seven target remains a player");
+                self.swap_hands(self.current_index, target_index);
+                self.advance_turn(1);
+                Some(HandEffect::Swap { target })
+            }
+            Rank::Number(0) if self.house_rules.seven_zero => {
+                let direction = self.direction;
+                self.rotate_hands(direction);
+                self.advance_turn(1);
+                Some(HandEffect::Rotate { direction })
+            }
+            Rank::Number(_) | Rank::Wild => {
+                self.advance_turn(1);
+                None
+            }
+        }
+    }
+
+    fn swap_hands(&mut self, first: usize, second: usize) {
+        if first < second {
+            let (left, right) = self.players.split_at_mut(second);
+            std::mem::swap(&mut left[first].hand, &mut right[0].hand);
+        } else {
+            let (left, right) = self.players.split_at_mut(first);
+            std::mem::swap(&mut right[0].hand, &mut left[second].hand);
+        }
+    }
+
+    fn rotate_hands(&mut self, direction: Direction) {
+        let player_count = self.players.len();
+        let hands = self
+            .players
+            .iter_mut()
+            .map(|player| std::mem::take(&mut player.hand))
+            .collect::<Vec<_>>();
+        for (source, hand) in hands.into_iter().enumerate() {
+            let target = match direction {
+                Direction::Clockwise => (source + 1) % player_count,
+                Direction::CounterClockwise => (source + player_count - 1) % player_count,
+            };
+            self.players[target].hand = hand;
         }
     }
 
@@ -867,9 +1026,11 @@ pub fn deck(variant: DeckVariant) -> Vec<Card> {
 }
 
 pub fn standard_deck() -> Vec<Card> {
-    let mut deck = Vec::with_capacity(108);
+    let mut deck = Vec::with_capacity(112);
     for color in Color::ALL {
-        deck.push(Card::new(color, Rank::Number(0)));
+        for _ in 0..2 {
+            deck.push(Card::new(color, Rank::Number(0)));
+        }
         for number in 1..=9 {
             deck.push(Card::new(color, Rank::Number(number)));
             deck.push(Card::new(color, Rank::Number(number)));
@@ -913,15 +1074,30 @@ mod tests {
     }
 
     #[test]
-    fn standard_deck_has_108_cards() {
-        assert_eq!(standard_deck().len(), 108);
+    fn standard_deck_has_112_cards_and_two_zeros_per_color() {
+        let deck = standard_deck();
+        assert_eq!(deck.len(), 112);
+        for color in Color::ALL {
+            assert_eq!(
+                deck.iter()
+                    .filter(|card| **card == Card::new(color, Rank::Number(0)))
+                    .count(),
+                2
+            );
+        }
     }
 
     #[test]
     fn holiday_deck_has_exact_expansion_cards() {
         let deck = holiday_deck();
-        assert_eq!(deck.len(), 118);
+        assert_eq!(deck.len(), 122);
         for color in Color::ALL {
+            assert_eq!(
+                deck.iter()
+                    .filter(|card| **card == Card::new(color, Rank::Number(0)))
+                    .count(),
+                2
+            );
             assert_eq!(
                 deck.iter()
                     .filter(|card| **card == Card::new(color, Rank::DrawEight))
@@ -1225,6 +1401,7 @@ mod tests {
                 Action::Play {
                     card: old_card,
                     chosen_color: old_card.is_wild().then_some(Color::Red),
+                    swap_target: None,
                 },
             )
             .unwrap_err(),
@@ -1247,6 +1424,7 @@ mod tests {
                 Action::Play {
                     card: Card::wild(Rank::WildDrawFour),
                     chosen_color: Some(Color::Blue),
+                    swap_target: None,
                 },
             )
             .unwrap_err(),
@@ -1270,6 +1448,7 @@ mod tests {
             Action::Play {
                 card: selected,
                 chosen_color: None,
+                swap_target: None,
             },
         )
         .unwrap();
@@ -1288,7 +1467,8 @@ mod tests {
                         color: Some(Color::Green),
                         rank: Rank::DrawEight
                     },
-                    chosen_color: None
+                    chosen_color: None,
+                    swap_target: None,
                 }
             )
         }));
@@ -1315,6 +1495,7 @@ mod tests {
                 Action::Play {
                     card: wild,
                     chosen_color: None,
+                    swap_target: None,
                 },
             )
             .unwrap_err(),
@@ -1325,6 +1506,7 @@ mod tests {
             Action::Play {
                 card: wild,
                 chosen_color: Some(Color::Green),
+                swap_target: None,
             },
         )
         .unwrap();
@@ -1355,6 +1537,7 @@ mod tests {
             Action::Play {
                 card: wild,
                 chosen_color: Some(Color::Blue),
+                swap_target: None,
             },
         )
         .unwrap();
@@ -1382,6 +1565,7 @@ mod tests {
             Action::Play {
                 card: wild,
                 chosen_color: Some(Color::Yellow),
+                swap_target: None,
             },
         )
         .unwrap();
@@ -1406,6 +1590,7 @@ mod tests {
             Action::Play {
                 card: selected,
                 chosen_color: None,
+                swap_target: None,
             },
         )
         .unwrap();
@@ -1436,11 +1621,242 @@ mod tests {
             Action::Play {
                 card: selected,
                 chosen_color: None,
+                swap_target: None,
             },
         )
         .unwrap();
 
         assert_eq!(game.public_state().winner, Some(current));
+    }
+
+    #[test]
+    fn seven_swaps_remaining_hands_and_requires_another_player() {
+        let mut game = Game::new_seeded(players(3), DeckVariant::Standard, 30).unwrap();
+        let current = game.current_player().clone();
+        let target = game.players[2].id.clone();
+        let seven = Card::new(Color::Red, Rank::Number(7));
+        let actors_remaining = Card::new(Color::Blue, Rank::Number(1));
+        let targets_hand = vec![
+            Card::new(Color::Yellow, Rank::Number(3)),
+            Card::new(Color::Green, Rank::Number(4)),
+        ];
+        game.active_color = Color::Red;
+        game.discard_pile = vec![Card::new(Color::Red, Rank::Number(5))];
+        game.players[0].hand = vec![seven, actors_remaining];
+        game.players[2].hand.clone_from(&targets_hand);
+
+        assert_eq!(
+            game.apply_action(
+                &current,
+                Action::Play {
+                    card: seven,
+                    chosen_color: None,
+                    swap_target: None,
+                },
+            )
+            .unwrap_err(),
+            GameError::MissingSwapTarget
+        );
+        assert_eq!(game.players[0].hand, vec![seven, actors_remaining]);
+
+        let event = game
+            .apply_action(
+                &current,
+                Action::Play {
+                    card: seven,
+                    chosen_color: None,
+                    swap_target: Some(target.clone()),
+                },
+            )
+            .unwrap();
+
+        assert_eq!(game.players[0].hand, targets_hand);
+        assert_eq!(game.players[2].hand, vec![actors_remaining]);
+        assert_eq!(game.current_player(), &game.players[1].id);
+        assert!(matches!(
+            event.kind,
+            EventKind::CardPlayed {
+                hand_effect: Some(HandEffect::Swap { target: event_target }),
+                ..
+            } if event_target == target
+        ));
+    }
+
+    #[test]
+    fn seven_rejects_self_and_unexpected_targets_without_mutation() {
+        let mut game = game();
+        let current = game.current_player().clone();
+        let seven = Card::new(Color::Red, Rank::Number(7));
+        let other = Card::new(Color::Blue, Rank::Number(2));
+        game.active_color = Color::Red;
+        game.discard_pile = vec![Card::new(Color::Red, Rank::Number(5))];
+        game.players[0].hand = vec![seven, other];
+
+        assert_eq!(
+            game.apply_action(
+                &current,
+                Action::Play {
+                    card: seven,
+                    chosen_color: None,
+                    swap_target: Some(current.clone()),
+                },
+            )
+            .unwrap_err(),
+            GameError::InvalidSwapTarget(current.clone())
+        );
+        assert_eq!(game.players[0].hand, vec![seven, other]);
+
+        game.house_rules.seven_zero = false;
+        assert_eq!(
+            game.apply_action(
+                &current,
+                Action::Play {
+                    card: seven,
+                    chosen_color: None,
+                    swap_target: Some(game.players[1].id.clone()),
+                },
+            )
+            .unwrap_err(),
+            GameError::UnexpectedSwapTarget
+        );
+    }
+
+    #[test]
+    fn disabled_seven_zero_treats_numbers_normally() {
+        let mut game = game();
+        let current = game.current_player().clone();
+        let seven = Card::new(Color::Red, Rank::Number(7));
+        let remaining = Card::new(Color::Blue, Rank::Number(2));
+        game.house_rules.seven_zero = false;
+        game.active_color = Color::Red;
+        game.discard_pile = vec![Card::new(Color::Red, Rank::Number(5))];
+        game.players[0].hand = vec![seven, remaining];
+        let target_before = game.players[1].hand.clone();
+
+        let event = game
+            .apply_action(
+                &current,
+                Action::Play {
+                    card: seven,
+                    chosen_color: None,
+                    swap_target: None,
+                },
+            )
+            .unwrap();
+
+        assert_eq!(game.players[0].hand, vec![remaining]);
+        assert_eq!(game.players[1].hand, target_before);
+        assert!(matches!(
+            event.kind,
+            EventKind::CardPlayed {
+                hand_effect: None,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn zero_rotates_hands_in_both_directions() {
+        for direction in [Direction::Clockwise, Direction::CounterClockwise] {
+            let mut game = Game::new_seeded(players(3), DeckVariant::Standard, 31).unwrap();
+            let current = game.current_player().clone();
+            let zero = Card::new(Color::Red, Rank::Number(0));
+            let first = vec![Card::new(Color::Blue, Rank::Number(1))];
+            let second = vec![Card::new(Color::Green, Rank::Number(2))];
+            let third = vec![Card::new(Color::Yellow, Rank::Number(3))];
+            game.direction = direction;
+            game.active_color = Color::Red;
+            game.discard_pile = vec![Card::new(Color::Red, Rank::Number(5))];
+            game.players[0].hand = [vec![zero], first.clone()].concat();
+            game.players[1].hand.clone_from(&second);
+            game.players[2].hand.clone_from(&third);
+
+            let event = game
+                .apply_action(
+                    &current,
+                    Action::Play {
+                        card: zero,
+                        chosen_color: None,
+                        swap_target: None,
+                    },
+                )
+                .unwrap();
+
+            let expected = match direction {
+                Direction::Clockwise => [third.clone(), first.clone(), second.clone()],
+                Direction::CounterClockwise => [second.clone(), third.clone(), first.clone()],
+            };
+            assert_eq!(game.players[0].hand, expected[0]);
+            assert_eq!(game.players[1].hand, expected[1]);
+            assert_eq!(game.players[2].hand, expected[2]);
+            assert!(matches!(
+                event.kind,
+                EventKind::CardPlayed {
+                    hand_effect: Some(HandEffect::Rotate { direction: event_direction }),
+                    ..
+                } if event_direction == direction
+            ));
+        }
+    }
+
+    #[test]
+    fn two_player_zero_swaps_hands() {
+        let mut game = game();
+        let current = game.current_player().clone();
+        let zero = Card::new(Color::Red, Rank::Number(0));
+        let first = Card::new(Color::Blue, Rank::Number(1));
+        let second = vec![Card::new(Color::Green, Rank::Number(2))];
+        game.active_color = Color::Red;
+        game.discard_pile = vec![Card::new(Color::Red, Rank::Number(5))];
+        game.players[0].hand = vec![zero, first];
+        game.players[1].hand.clone_from(&second);
+
+        game.apply_action(
+            &current,
+            Action::Play {
+                card: zero,
+                chosen_color: None,
+                swap_target: None,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(game.players[0].hand, second);
+        assert_eq!(game.players[1].hand, vec![first]);
+    }
+
+    #[test]
+    fn multi_discard_seven_wins_without_swapping() {
+        let mut game = game();
+        let current = game.current_player().clone();
+        let target = game.players[1].id.clone();
+        let red = Card::new(Color::Red, Rank::Number(7));
+        let blue = Card::new(Color::Blue, Rank::Number(7));
+        game.active_color = Color::Red;
+        game.discard_pile = vec![Card::new(Color::Red, Rank::Number(5))];
+        game.players[0].hand = vec![red, blue];
+        let target_before = game.players[1].hand.clone();
+
+        let event = game
+            .apply_action(
+                &current,
+                Action::Play {
+                    card: red,
+                    chosen_color: None,
+                    swap_target: Some(target),
+                },
+            )
+            .unwrap();
+
+        assert_eq!(game.public_state().winner, Some(current));
+        assert_eq!(game.players[1].hand, target_before);
+        assert!(matches!(
+            event.kind,
+            EventKind::CardPlayed {
+                hand_effect: None,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -1458,6 +1874,7 @@ mod tests {
             Action::Play {
                 card: Card::new(Color::Red, Rank::Reverse),
                 chosen_color: None,
+                swap_target: None,
             },
         )
         .unwrap();
@@ -1476,9 +1893,17 @@ mod tests {
         ];
         game.discard_pile.clone_from(&discards);
 
-        game.draw_card().unwrap();
+        let drawn = game.draw_card().unwrap();
 
         assert_eq!(game.draw_pile.len(), standard_deck().len() - 1);
+        assert_eq!(
+            game.draw_pile
+                .iter()
+                .filter(|card| card.rank == Rank::Number(0))
+                .count()
+                + usize::from(drawn.rank == Rank::Number(0)),
+            8
+        );
         assert_eq!(game.discard_pile, discards);
     }
 
@@ -1492,9 +1917,17 @@ mod tests {
         game.draw_pile.clear();
         game.discard_pile.clone_from(&discards);
 
-        game.draw_card().unwrap();
+        let drawn = game.draw_card().unwrap();
 
         assert_eq!(game.draw_pile.len(), holiday_deck().len() - 1);
+        assert_eq!(
+            game.draw_pile
+                .iter()
+                .filter(|card| card.rank == Rank::Number(0))
+                .count()
+                + usize::from(drawn.rank == Rank::Number(0)),
+            8
+        );
         assert_eq!(game.discard_pile, discards);
     }
 
@@ -1548,6 +1981,7 @@ mod tests {
             Action::Play {
                 card,
                 chosen_color: None,
+                swap_target: None,
             },
         )
         .unwrap();

@@ -18,6 +18,7 @@ pub struct AppView<'a> {
 impl<'a> AppView<'a> {
     pub fn new(app: &'a App, images_allowed: bool) -> Self {
         let overlays = app.pending_wild.is_some()
+            || app.pending_seven.is_some()
             || matches!(
                 app.screen,
                 Screen::Help | Screen::Result | Screen::QuitConfirm
@@ -81,7 +82,9 @@ pub fn adjacent_hand_card(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::PendingSeven;
     use crate::core::{Color, Rank};
+    use crate::frontend::GraphicsChoice;
 
     #[test]
     fn hand_wrapping_and_vertical_navigation_share_geometry() {
@@ -93,5 +96,20 @@ mod tests {
         let rows = wrap_hand(Language::English, &hand, 16);
         assert!(rows.len() > 1);
         assert_eq!(adjacent_hand_card(Language::English, &hand, 1, 16, -1), 0);
+    }
+
+    #[test]
+    fn seven_picker_suppresses_game_images() {
+        let mut app = App::with_graphics(Language::English, GraphicsChoice::GraphicsBeta);
+        app.setup.bot_count = 1;
+        app.start_match().unwrap();
+        app.pending_seven = Some(PendingSeven {
+            player_index: 0,
+            card: Card::new(Color::Red, Rank::Number(7)),
+            targets: app.ai_ids.clone(),
+            selected_target: 0,
+        });
+
+        assert!(!AppView::new(&app, true).images_allowed);
     }
 }

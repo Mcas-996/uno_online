@@ -7,7 +7,8 @@ use std::time::{Duration, Instant};
 
 use crate::ai::{Difficulty, choose_action};
 use crate::core::{
-    Action, Card, Color, DeckVariant, EventKind, Game, GameEvent, PlayerDrawRule, PlayerId,
+    Action, Card, Color, DeckVariant, EventKind, Game, GameEvent, HandEffect, HouseRules,
+    PlayerDrawRule, PlayerId, Rank,
 };
 use rand::SeedableRng;
 use rand::rngs::StdRng;
@@ -51,6 +52,7 @@ pub struct Setup {
     pub bot_count: usize,
     pub difficulty: Difficulty,
     pub deck_variant: DeckVariant,
+    pub seven_zero: bool,
     /// 用户选择的牌面显示策略；实际协议仍由 `GraphicsRuntime` 根据终端决定。
     pub graphics: GraphicsChoice,
     pub selected: usize,
@@ -64,6 +66,7 @@ impl Setup {
             bot_count: 3,
             difficulty: Difficulty::Normal,
             deck_variant: DeckVariant::Holiday,
+            seven_zero: true,
             graphics,
             selected: 1,
         }
@@ -74,6 +77,14 @@ impl Setup {
 pub struct PendingWild {
     pub player_index: usize,
     pub card: Card,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PendingSeven {
+    pub player_index: usize,
+    pub card: Card,
+    pub targets: Vec<PlayerId>,
+    pub selected_target: usize,
 }
 
 pub struct App {
@@ -87,6 +98,7 @@ pub struct App {
     pub command_mode: bool,
     pub command: String,
     pub pending_wild: Option<PendingWild>,
+    pub pending_seven: Option<PendingSeven>,
     pub selected_color: usize,
     pub logs: VecDeque<String>,
     pub status: String,
@@ -115,6 +127,7 @@ impl App {
             command_mode: false,
             command: String::new(),
             pending_wild: None,
+            pending_seven: None,
             selected_color: 0,
             logs: VecDeque::new(),
             status: String::new(),
@@ -152,11 +165,24 @@ impl App {
             &self.human_ids[..human_count],
             &self.ai_ids,
         );
+        let house_rules = HouseRules {
+            seven_zero: self.setup.seven_zero,
+        };
         self.game = Some(
-            if self.setup.deck_variant == DeckVariant::Holiday {
-                Game::new_with_draw_rules(players, self.setup.deck_variant, player_draw_rules)
-            } else {
-                Game::new(players, self.setup.deck_variant)
+            match (self.setup.deck_variant, self.setup.seven_zero) {
+                (DeckVariant::Holiday, true) => {
+                    Game::new_with_draw_rules(players, self.setup.deck_variant, player_draw_rules)
+                }
+                (DeckVariant::Holiday, false) => Game::new_with_house_rules_and_draw_rules(
+                    players,
+                    self.setup.deck_variant,
+                    house_rules,
+                    player_draw_rules,
+                ),
+                (DeckVariant::Standard, true) => Game::new(players, self.setup.deck_variant),
+                (DeckVariant::Standard, false) => {
+                    Game::new_with_house_rules(players, self.setup.deck_variant, house_rules)
+                }
             }
             .map_err(|error| error.to_string())?,
         );
@@ -164,6 +190,7 @@ impl App {
         self.selected_cards = [0; 2];
         self.command_mode = false;
         self.pending_wild = None;
+        self.pending_seven = None;
         self.logs.clear();
         self.update_turn_status();
         self.ai_deadline = Instant::now() + AI_DELAY;
@@ -202,7 +229,11 @@ impl App {
     }
 
     pub fn tick(&mut self) {
-        if self.screen != Screen::Game || self.pending_wild.is_some() || self.command_mode {
+        if self.screen != Screen::Game
+            || self.pending_wild.is_some()
+            || self.pending_seven.is_some()
+            || self.command_mode
+        {
             return;
         }
         let Some(game) = self.game.as_ref() else {
@@ -229,15 +260,15 @@ impl App {
         };
         match code {
             KeyCode::Up => self.setup.selected = self.setup.selected.saturating_sub(1),
-            KeyCode::Down => self.setup.selected = (self.setup.selected + 1).min(8),
+            KeyCode::Down => self.setup.selected = (self.setup.selected + 1).min(9),
             KeyCode::Left => self.adjust_setup(-1),
             KeyCode::Right => self.adjust_setup(1),
-            KeyCode::Enter if self.setup.selected == 8 => {
+            KeyCode::Enter if self.setup.selected == 9 => {
                 if let Err(error) = self.start_match() {
                     self.status = error;
                 }
             }
-            KeyCode::Enter => self.setup.selected = (self.setup.selected + 1).min(8),
+            KeyCode::Enter => self.setup.selected = (self.setup.selected + 1).min(9),
             KeyCode::Backspace if editing_name => {
                 self.setup.names[self.setup.selected - 1].pop();
             }
@@ -297,7 +328,8 @@ impl App {
                     .clamp(0, DeckVariant::ALL.len() - 1);
                 self.setup.deck_variant = DeckVariant::ALL[index];
             }
-            6 => {
+            6 => self.setup.seven_zero = delta >= 0,
+            7 => {
                 let old_language = self.language;
                 let old_defaults = default_player_names(old_language);
                 let index = Language::ALL
@@ -314,7 +346,7 @@ impl App {
                     }
                 }
             }
-            7 => {
+            8 => {
                 // 此处只保存 Text/Graphics Beta 偏好，不在输入处理阶段探测或切换协议；
                 // UI 每帧通过 GraphicsRuntime 解析实际后端。
                 let index = GraphicsChoice::ALL
@@ -336,6 +368,10 @@ impl App {
         }
         if self.pending_wild.is_some() {
             self.handle_color_key(key);
+            return;
+        }
+        if self.pending_seven.is_some() {
+            self.handle_seven_target_key(key);
             return;
         }
         if let Some((player_index, code)) = self.player_navigation(key) {
@@ -461,6 +497,48 @@ impl App {
                         Action::Play {
                             card: pending.card,
                             chosen_color: Some(Color::ALL[self.selected_color]),
+                            swap_target: None,
+                        },
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn handle_seven_target_key(&mut self, key: KeyEvent) {
+        let Some(pending) = self.pending_seven.as_ref() else {
+            return;
+        };
+        let player_index = pending.player_index;
+        let navigation = self
+            .player_navigation(key)
+            .filter(|(candidate, _)| *candidate == player_index)
+            .map(|(_, code)| code)
+            .unwrap_or(key.code);
+        match navigation {
+            KeyCode::Left => {
+                if let Some(pending) = self.pending_seven.as_mut() {
+                    pending.selected_target = pending.selected_target.saturating_sub(1);
+                }
+            }
+            KeyCode::Right => {
+                if let Some(pending) = self.pending_seven.as_mut() {
+                    pending.selected_target =
+                        (pending.selected_target + 1).min(pending.targets.len().saturating_sub(1));
+                }
+            }
+            KeyCode::Esc => self.pending_seven = None,
+            KeyCode::Enter => {
+                if let Some(pending) = self.pending_seven.take()
+                    && let Some(target) = pending.targets.get(pending.selected_target).cloned()
+                {
+                    self.submit_human(
+                        pending.player_index,
+                        Action::Play {
+                            card: pending.card,
+                            chosen_color: None,
+                            swap_target: Some(target),
                         },
                     );
                 }
@@ -488,12 +566,36 @@ impl App {
         if card.is_wild() {
             self.pending_wild = Some(PendingWild { player_index, card });
             self.selected_color = 0;
+        } else if self
+            .game
+            .as_ref()
+            .is_some_and(|game| game.house_rules().seven_zero)
+            && card.rank == Rank::Number(7)
+        {
+            let current = self.human_ids[player_index].clone();
+            let targets = self
+                .game
+                .as_ref()
+                .expect("game screen has game")
+                .public_state()
+                .players
+                .into_iter()
+                .filter(|player| player.id != current)
+                .map(|player| player.id)
+                .collect();
+            self.pending_seven = Some(PendingSeven {
+                player_index,
+                card,
+                targets,
+                selected_target: 0,
+            });
         } else {
             self.submit_human(
                 player_index,
                 Action::Play {
                     card,
                     chosen_color: None,
+                    swap_target: None,
                 },
             );
         }
@@ -565,11 +667,29 @@ impl App {
             .map(|player| player.name.clone())
             .unwrap_or_default();
         let line = match event.kind {
-            EventKind::CardPlayed { card, .. } => format!(
-                "{name} {} {}",
-                self.language.text(Message::Played),
-                self.language.card(card)
-            ),
+            EventKind::CardPlayed {
+                card, hand_effect, ..
+            } => {
+                let played = format!(
+                    "{name} {} {}",
+                    self.language.text(Message::Played),
+                    self.language.card(card)
+                );
+                match hand_effect {
+                    Some(HandEffect::Swap { target }) => {
+                        let target_name = state
+                            .players
+                            .iter()
+                            .find(|player| player.id == target)
+                            .map_or(target.0.as_str(), |player| player.name.as_str());
+                        self.language.swap_log(&played, target_name)
+                    }
+                    Some(HandEffect::Rotate { direction }) => {
+                        self.language.rotate_log(&played, direction)
+                    }
+                    None => played,
+                }
+            }
             EventKind::CardDrawn { .. } => {
                 format!("{name} {}", self.language.text(Message::DrewCard))
             }
@@ -635,6 +755,7 @@ impl App {
         self.screen = Screen::Setup;
         self.command_mode = false;
         self.pending_wild = None;
+        self.pending_seven = None;
         self.logs.clear();
         self.status.clear();
     }
@@ -766,6 +887,20 @@ impl AppCommand {
 mod tests {
     use super::*;
 
+    fn prepare_human_seven(app: &mut App) {
+        app.start_match().unwrap();
+        let human = app.human_ids[0].clone();
+        app.game.as_mut().unwrap().set_test_turn(
+            &human,
+            vec![
+                Card::new(Color::Red, Rank::Number(7)),
+                Card::new(Color::Blue, Rank::Number(1)),
+            ],
+            Card::new(Color::Red, Rank::Number(5)),
+        );
+        app.selected_cards[0] = 0;
+    }
+
     #[test]
     fn difficulty_assigns_human_guarantees_without_changing_ai_rules() {
         let human = PlayerId::new("human");
@@ -817,8 +952,54 @@ mod tests {
     }
 
     #[test]
+    fn seven_picker_supports_keyboard_cancel_confirm_and_command_play() {
+        let mut app = App::new(Language::English);
+        app.setup.bot_count = 2;
+        prepare_human_seven(&mut app);
+
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), 80);
+        assert_eq!(app.pending_seven.as_ref().unwrap().targets.len(), 2);
+        app.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE), 80);
+        assert_eq!(app.pending_seven.as_ref().unwrap().selected_target, 1);
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), 80);
+        assert!(app.pending_seven.is_none());
+        assert_eq!(app.human_hand(0).unwrap().len(), 2);
+
+        app.handle_key(KeyEvent::new(KeyCode::Char(':'), KeyModifiers::NONE), 80);
+        for character in "play 1".chars() {
+            app.handle_key(
+                KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE),
+                80,
+            );
+        }
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), 80);
+        assert!(app.pending_seven.is_some());
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), 80);
+        assert!(app.pending_seven.is_none());
+        assert!(app.logs.back().unwrap().contains("swapped hands with"));
+    }
+
+    #[test]
+    fn dual_seven_picker_only_accepts_current_players_navigation() {
+        let mut app = App::new(Language::English);
+        app.setup.mode = PlayMode::Dual;
+        app.setup.bot_count = 1;
+        prepare_human_seven(&mut app);
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), 80);
+        app.pending_seven.as_mut().unwrap().selected_target = 1;
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE), 80);
+        assert_eq!(app.pending_seven.as_ref().unwrap().selected_target, 1);
+        app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE), 80);
+        assert_eq!(app.pending_seven.as_ref().unwrap().selected_target, 0);
+        app.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE), 80);
+        assert_eq!(app.pending_seven.as_ref().unwrap().selected_target, 1);
+    }
+
+    #[test]
     fn setup_starts_two_to_five_player_game() {
         let mut app = App::new(Language::English);
+        assert!(app.setup.seven_zero);
         for bots in 1..=4 {
             app.setup.bot_count = bots;
             app.start_match().unwrap();
@@ -830,6 +1011,7 @@ mod tests {
                 app.game.as_ref().unwrap().deck_variant(),
                 DeckVariant::Holiday
             );
+            assert!(app.game.as_ref().unwrap().house_rules().seven_zero);
             app.return_to_setup();
         }
 
@@ -884,6 +1066,12 @@ mod tests {
         }
         assert_eq!(app.setup.difficulty, Difficulty::Easy);
 
+        app.setup.selected = 6;
+        app.adjust_setup(-1);
+        assert!(!app.setup.seven_zero);
+        app.adjust_setup(1);
+        assert!(app.setup.seven_zero);
+
         app.setup.selected = 0;
         app.adjust_setup(1);
         assert_eq!(app.setup.mode, PlayMode::Dual);
@@ -901,7 +1089,7 @@ mod tests {
     #[test]
     fn setup_language_setting_switches_copy_and_preserves_custom_name() {
         let mut app = App::new(Language::English);
-        app.setup.selected = 6;
+        app.setup.selected = 7;
 
         app.adjust_setup(1);
         assert_eq!(app.language, Language::Chinese);
@@ -918,7 +1106,7 @@ mod tests {
     fn setup_graphics_setting_switches_between_text_and_graphics_beta() {
         let mut app = App::new(Language::English);
         assert_eq!(app.setup.graphics, GraphicsChoice::Text);
-        app.setup.selected = 7;
+        app.setup.selected = 8;
 
         app.adjust_setup(1);
         assert_eq!(app.setup.graphics, GraphicsChoice::GraphicsBeta);

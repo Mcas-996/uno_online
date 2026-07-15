@@ -280,6 +280,47 @@ pub fn render(app: &App, backend: GraphicsBackend, viewport: Viewport) -> Canvas
             ),
         );
     }
+    if let Some(pending) = app.pending_seven.as_ref() {
+        let state = app
+            .game
+            .as_ref()
+            .expect("pending seven has game")
+            .public_state();
+        let targets = pending
+            .targets
+            .iter()
+            .enumerate()
+            .filter_map(|(index, target)| {
+                state
+                    .players
+                    .iter()
+                    .find(|player| player.id == *target)
+                    .map(|player| {
+                        let label = format!(
+                            "{} ({} {})",
+                            player.name,
+                            player.hand_len,
+                            app.language.text(Message::Cards)
+                        );
+                        if index == pending.selected_target {
+                            format!("[{label}]")
+                        } else {
+                            label
+                        }
+                    })
+            })
+            .collect::<Vec<_>>()
+            .join("  ");
+        render_compact_overlay(
+            &mut canvas,
+            app.language.text(Message::ChoosePlayer),
+            &format!(
+                "{targets}\n{}",
+                app.language
+                    .target_hint(app.setup.mode, pending.player_index)
+            ),
+        );
+    }
     canvas
 }
 
@@ -331,6 +372,11 @@ fn render_setup(canvas: &mut Canvas, app: &App, backend: GraphicsBackend) {
             "{}: {}",
             app.language.text(Message::Deck),
             app.language.deck_variant(app.setup.deck_variant)
+        ),
+        format!(
+            "{}: {}",
+            app.language.text(Message::SevenZero),
+            app.language.enabled(app.setup.seven_zero)
         ),
         format!(
             "{}: {}",
@@ -690,7 +736,7 @@ fn render_result(canvas: &mut Canvas, app: &App) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::PendingWild;
+    use crate::app::{PendingSeven, PendingWild};
     use crate::frontend::{FallbackReason, GraphicsChoice};
     use crate::i18n::Language;
 
@@ -707,6 +753,7 @@ mod tests {
         )
         .plain_text();
         assert!(setup.contains("New local match"));
+        assert!(setup.contains("7-0 rule: Enabled"));
         let small = render(
             &app,
             GraphicsBackend::Text(FallbackReason::Manual),
@@ -809,5 +856,33 @@ mod tests {
         assert!(picker.contains("[红]  黄  绿  蓝"));
         assert!(picker.contains("你的手牌"));
         assert!(picker.contains("事件"));
+    }
+
+    #[test]
+    fn seven_target_picker_lists_public_players_and_suppresses_images() {
+        let mut app = App::with_graphics(Language::English, GraphicsChoice::GraphicsBeta);
+        app.setup.bot_count = 2;
+        app.start_match().unwrap();
+        app.pending_seven = Some(PendingSeven {
+            player_index: 0,
+            card: Card::new(Color::Red, crate::core::Rank::Number(7)),
+            targets: app.ai_ids.clone(),
+            selected_target: 0,
+        });
+
+        let picker = render(
+            &app,
+            GraphicsBackend::Sixel,
+            Viewport {
+                columns: 80,
+                rows: 28,
+            },
+        );
+        let text = picker.plain_text();
+
+        assert!(picker.images.is_empty());
+        assert!(text.contains("Choose a player"));
+        assert!(text.contains("[AI 1 (7 cards)]"));
+        assert!(text.contains("AI 2 (7 cards)"));
     }
 }
