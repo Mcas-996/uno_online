@@ -144,17 +144,11 @@ impl Language {
         match (self, choice, backend) {
             (Self::English, GraphicsChoice::Text, _) => "Text".to_owned(),
             (Self::Chinese, GraphicsChoice::Text, _) => "文字".to_owned(),
-            (Self::English, GraphicsChoice::GraphicsBeta, GraphicsBackend::Iterm2) => {
-                "Graphics (Beta) (iTerm2)".to_owned()
-            }
             (Self::English, GraphicsChoice::GraphicsBeta, GraphicsBackend::Sixel) => {
                 "Graphics (Beta) (Sixel)".to_owned()
             }
             (Self::English, GraphicsChoice::GraphicsBeta, GraphicsBackend::Kitty) => {
                 "Graphics (Beta) (Kitty)".to_owned()
-            }
-            (Self::Chinese, GraphicsChoice::GraphicsBeta, GraphicsBackend::Iterm2) => {
-                "图像（Beta）（iTerm2）".to_owned()
             }
             (Self::Chinese, GraphicsChoice::GraphicsBeta, GraphicsBackend::Sixel) => {
                 "图像（Beta）（Sixel）".to_owned()
@@ -354,8 +348,8 @@ mod tests {
         assert_eq!(Language::English.difficulty(Difficulty::Extreme), "Extreme");
         assert_eq!(Language::Chinese.difficulty(Difficulty::Extreme), "最难");
         assert_eq!(
-            Language::English.graphics(GraphicsChoice::GraphicsBeta, GraphicsBackend::Iterm2),
-            "Graphics (Beta) (iTerm2)"
+            Language::English.graphics(GraphicsChoice::GraphicsBeta, GraphicsBackend::Kitty),
+            "Graphics (Beta) (Kitty)"
         );
         assert_eq!(
             Language::Chinese.graphics(

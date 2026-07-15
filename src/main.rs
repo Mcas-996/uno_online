@@ -22,7 +22,7 @@ use crossterm::execute;
 use crossterm::terminal::{
     Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
-use graphics::{GraphicsRuntime, WeztermPreparation};
+use graphics::{GraphicsRuntime, KittyPreparation};
 use i18n::Language;
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
@@ -89,26 +89,23 @@ fn run_tui() -> io::Result<()> {
     let mut app = App::with_graphics(Language::detect(), graphics.default_choice());
 
     while !app.should_exit {
-        // UI 在任何输出前唯一确定最终图片矩形；WezTerm 还会先原子编码两槽。
+        // UI 在绘制前唯一确定最终图片矩形；协议放置由 Ratatui 统一完成。
         let area = terminal.size()?;
         let mut plan = ui::preview_plan(&app, area.into(), &mut graphics);
-        if graphics.uses_wezterm_placement() {
+        if graphics.uses_application_kitty() {
             let preparation =
-                graphics.prepare_wezterm_frame(plan.terminal_size, plan.selected, plan.discard);
+                graphics.prepare_kitty_frame(plan.terminal_size, plan.selected, plan.discard);
             let (frame_update, fell_back) = match preparation {
-                WeztermPreparation::Ready(update) => (update, false),
-                WeztermPreparation::Fallback(update) => (update, true),
+                KittyPreparation::Ready(update) => (update, false),
+                KittyPreparation::Fallback(update) => (update, true),
             };
             if fell_back {
                 plan = ui::preview_plan(&app, area.into(), &mut graphics);
             }
-            if frame_update.clear_terminal {
-                terminal.clear()?;
-            }
             write_terminal_bytes(&mut terminal, &frame_update.before_draw)?;
             terminal.draw(|frame| ui::render(frame, &app, &mut graphics, plan))?;
             write_terminal_bytes(&mut terminal, &frame_update.after_draw)?;
-            graphics.commit_wezterm_frame(frame_update, plan.terminal_size);
+            graphics.commit_kitty_frame(frame_update, plan.terminal_size);
         } else {
             terminal.draw(|frame| ui::render(frame, &app, &mut graphics, plan))?;
         }
@@ -122,6 +119,7 @@ fn run_tui() -> io::Result<()> {
         app.tick();
     }
     // 在清屏和恢复光标前先丢弃图像协议，防止终端保留牌面预览。
+    write_terminal_bytes(&mut terminal, &graphics.shutdown_kitty())?;
     graphics.suspend();
     terminal.clear()?;
     terminal.show_cursor()?;

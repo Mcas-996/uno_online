@@ -143,7 +143,7 @@ Modifications involving terminal rendering, keyboard interaction, or image proto
 
 - Setup offers `Text` and `Graphics (Beta)`. Only Windows Terminal, including WSL, defaults to beta graphics; WezTerm and every other terminal default to Text.
 
-- Any local terminal can opt into `Graphics (Beta)` to try a detected iTerm2, Sixel, or Kitty backend. Selecting `Text` disables image output.
+- Any local terminal can opt into `Graphics (Beta)` to try a detected Kitty or Sixel backend. iTerm2 is deprecated and safely falls back to text; selecting `Text` disables image output.
 
 - SSH sessions will automatically use text display to avoid image protocol escape sequences interfering with the remote terminal.
 

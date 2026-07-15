@@ -45,8 +45,6 @@ pub enum FallbackReason {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 /// 当前实际采用的图形后端。
 pub enum GraphicsBackend {
-    /// iTerm2 内联图像协议；本项目也用它适配 WezTerm。
-    Iterm2,
     /// Sixel 图像协议，主要用于受支持的 Windows Terminal。
     Sixel,
     /// Kitty 终端图像协议。
@@ -113,11 +111,11 @@ pub fn resolve_backend(
         return GraphicsBackend::Text(FallbackReason::Ssh);
     }
 
-    // WezTerm 在本项目中固定走 iTerm2；Halfblocks 等探测结果不能视为
+    // WezTerm 在本项目中固定走 Kitty；Halfblocks 等探测结果不能视为
     // 可接受的图像后端，否则牌面会退化为字符拼图且清理行为不同。
     if environment.is_wezterm {
-        return if detected == Some(ProtocolType::Iterm2) {
-            GraphicsBackend::Iterm2
+        return if detected == Some(ProtocolType::Kitty) {
+            GraphicsBackend::Kitty
         } else {
             GraphicsBackend::Text(FallbackReason::Unsupported)
         };
@@ -135,10 +133,11 @@ pub fn resolve_backend(
 
     // 其他本地终端没有额外约束，直接采用探测器确认的原生图像协议。
     match detected {
-        Some(ProtocolType::Iterm2) => GraphicsBackend::Iterm2,
         Some(ProtocolType::Sixel) => GraphicsBackend::Sixel,
         Some(ProtocolType::Kitty) => GraphicsBackend::Kitty,
-        Some(ProtocolType::Halfblocks) | None => GraphicsBackend::Text(FallbackReason::Unsupported),
+        Some(ProtocolType::Iterm2 | ProtocolType::Halfblocks) | None => {
+            GraphicsBackend::Text(FallbackReason::Unsupported)
+        }
     }
 }
 
@@ -154,8 +153,8 @@ pub enum PreviewSlot {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 /// 判断某个槽位的协议缓存是否仍可复用的完整条件。
 ///
-/// 协议数据同时包含图像内容、目标单元格尺寸和 WezTerm 锚点，所以仅比较
-/// 牌面或尺寸并不充分。
+/// 协议数据同时包含图像内容和目标单元格尺寸；完整矩形也用于在布局变化时
+/// 稳定地使缓存失效。
 struct ProtocolKey {
     /// 当前槽位展示的牌；牌变化后协议数据必须重新编码。
     card: Card,
@@ -169,33 +168,33 @@ struct CachedProtocol {
     protocol: Protocol,
 }
 
+#[derive(Clone)]
+/// 已编码并可能已发送的 WezTerm Kitty 基础协议放置。
+struct KittyPlacement {
+    key: ProtocolKey,
+    image_id: u32,
+    data: Vec<u8>,
+    emitted: bool,
+}
+
+/// 一帧中需要在 Ratatui 绘制前删除、绘制后发送的 Kitty 数据。
+pub struct KittyFrame {
+    pub before_draw: Vec<u8>,
+    pub after_draw: Vec<u8>,
+    next: [Option<KittyPlacement>; 2],
+}
+
+/// 编码失败时先删除旧图片，然后让 UI 重新规划为文字牌面。
+pub enum KittyPreparation {
+    Ready(KittyFrame),
+    Fallback(KittyFrame),
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 /// 一帧中某个图片槽位的最终内容与绝对单元格矩形。
 pub struct PreviewPlacement {
     pub card: Card,
     pub rect: Rect,
-}
-
-#[derive(Clone)]
-/// 已编码且可能已经发送到 WezTerm 的独立图片放置。
-struct WeztermPlacement {
-    key: ProtocolKey,
-    image: String,
-    emitted: bool,
-}
-
-/// WezTerm 一帧在 Ratatui 绘制前后需要输出的原子批次。
-pub struct WeztermFrame {
-    pub clear_terminal: bool,
-    pub before_draw: Vec<u8>,
-    pub after_draw: Vec<u8>,
-    next: [Option<WeztermPlacement>; 2],
-}
-
-/// 编码成功时继续图片帧；失败时先清理旧图片并以文字重新规划 UI。
-pub enum WeztermPreparation {
-    Ready(WeztermFrame),
-    Fallback(WeztermFrame),
 }
 
 /// 保存终端图像后端及跨帧复用的牌面资源。
@@ -207,24 +206,24 @@ pub struct GraphicsRuntime {
     picker: Option<Picker>,
     /// 能力探测或编码降级后得到的实际后端。
     detected_backend: GraphicsBackend,
-    /// 启动时识别到的终端环境；仅用于收窄 WezTerm 的位置包装分支。
+    /// 启动时识别到的终端环境；用于计算默认图形选项。
     environment: TerminalEnvironment,
-    /// WezTerm 且不在 tmux 中时，iTerm2 输出由应用在 Ratatui 外控制。
-    application_wezterm: bool,
+    /// WezTerm 不支持 ratatui-image 使用的 Unicode placeholder，需走基础放置协议。
+    application_kitty: bool,
+    /// Kitty APC 是否需要 tmux passthrough 包装。
+    kitty_tmux: bool,
     /// 按逻辑牌面缓存固定尺寸的 RGBA 原图，避免每次布局变化都重新绘制。
     art: HashMap<Card, image::DynamicImage>,
     /// 当前选中手牌的协议缓存。
     selected: Option<CachedProtocol>,
     /// 弃牌堆顶牌的协议缓存。
     discard: Option<CachedProtocol>,
-    /// 由应用在 Ratatui 之外管理的 WezTerm iTerm2 放置状态。
-    wezterm: [Option<WeztermPlacement>; 2],
-    /// 用于在窗口尺寸变化时触发一次完整清屏。
-    wezterm_terminal_size: Option<Size>,
+    /// WezTerm 基础 Kitty 协议中两个独立槽位的已发送状态。
+    kitty: [Option<KittyPlacement>; 2],
+    /// 终端尺寸变化时强制重新放置现有图片。
+    kitty_terminal_size: Option<Size>,
     #[cfg(test)]
     encodes: usize,
-    #[cfg(test)]
-    fail_card: Option<Card>,
 }
 
 impl GraphicsRuntime {
@@ -250,11 +249,12 @@ impl GraphicsRuntime {
     /// 所有构造路径（真实探测与测试替身）都经过这里，从而共享相同的后端
     /// 选择规则以及“文字模式不保留编码器”的不变量。
     fn from_picker(environment: TerminalEnvironment, mut picker: Option<Picker>) -> Self {
-        // WezTerm 的 iTerm2 实现能保留完整分辨率，优先于探测器的半块字符结果。
+        // WezTerm 原生支持 Kitty；即使探测器退回 Halfblocks，也统一切换到
+        // Kitty，避免重新引入已弃用的 iTerm2 专用路径。
         if environment.is_wezterm
             && let Some(picker) = picker.as_mut()
         {
-            picker.set_protocol_type(ProtocolType::Iterm2);
+            picker.set_protocol_type(ProtocolType::Kitty);
         }
         let detected = picker.as_ref().map(Picker::protocol_type);
         let detected_backend = resolve_backend(environment, detected);
@@ -263,21 +263,22 @@ impl GraphicsRuntime {
             .supports_images()
             .then_some(picker)
             .flatten();
-        let application_wezterm = environment.is_wezterm && env::var_os("TMUX").is_none();
+        let application_kitty =
+            environment.is_wezterm && detected_backend == GraphicsBackend::Kitty;
+        let kitty_tmux = application_kitty && env::var_os("TMUX").is_some();
         Self {
             picker,
             detected_backend,
             environment,
-            application_wezterm,
+            application_kitty,
+            kitty_tmux,
             art: HashMap::new(),
             selected: None,
             discard: None,
-            wezterm: [None, None],
-            wezterm_terminal_size: None,
+            kitty: [None, None],
+            kitty_terminal_size: None,
             #[cfg(test)]
             encodes: 0,
-            #[cfg(test)]
-            fail_card: None,
         }
     }
 
@@ -317,9 +318,9 @@ impl GraphicsRuntime {
         self.discard = None;
     }
 
-    /// 本地非 tmux WezTerm 使用应用控制的 iTerm2 生命周期。
-    pub fn uses_wezterm_placement(&self) -> bool {
-        self.application_wezterm
+    /// WezTerm 使用不依赖 Unicode placeholder 的 Kitty 基础放置路径。
+    pub fn uses_application_kitty(&self) -> bool {
+        self.application_kitty
     }
 
     /// 释放指定预览位置的协议数据。
@@ -330,83 +331,66 @@ impl GraphicsRuntime {
         }
     }
 
-    /// 在任何终端输出前编码本帧所有已变化的 WezTerm 图片并计算差异。
-    pub fn prepare_wezterm_frame(
+    /// 在 Ratatui 输出前准备 WezTerm 的 Kitty 基础协议差异。
+    pub fn prepare_kitty_frame(
         &mut self,
         terminal_size: Size,
         selected: Option<PreviewPlacement>,
         discard: Option<PreviewPlacement>,
-    ) -> WeztermPreparation {
-        debug_assert!(self.uses_wezterm_placement());
+    ) -> KittyPreparation {
+        debug_assert!(self.uses_application_kitty());
         let desired = [selected, discard];
-        let clear_terminal = self
-            .wezterm_terminal_size
+        let resized = self
+            .kitty_terminal_size
             .is_some_and(|previous| previous != terminal_size);
+        let mut next: [Option<KittyPlacement>; 2] = [None, None];
 
-        let mut next: [Option<WeztermPlacement>; 2] = [None, None];
         for (index, placement) in desired.into_iter().enumerate() {
             let Some(placement) = placement else { continue };
             let key = ProtocolKey {
                 card: placement.card,
                 rect: placement.rect,
             };
-            if let Some(existing) = self.wezterm[index].as_ref().filter(|item| item.key == key) {
-                next[index] = Some(existing.clone());
+            if let Some(existing) = self.kitty[index].as_ref().filter(|item| item.key == key) {
+                let mut placement = existing.clone();
+                if resized {
+                    placement.emitted = false;
+                }
+                next[index] = Some(placement);
                 continue;
             }
-            match self.encode_wezterm(key) {
-                Ok(image) => {
-                    next[index] = Some(WeztermPlacement {
-                        key,
-                        image,
-                        emitted: false,
-                    });
-                }
+
+            match self.encode_application_kitty(key) {
+                Ok(placement) => next[index] = Some(placement),
                 Err(_) => {
                     self.detected_backend = GraphicsBackend::Text(FallbackReason::Encoding);
+                    self.application_kitty = false;
                     self.picker = None;
                     self.suspend();
-                    let before_draw = if clear_terminal {
-                        Vec::new()
-                    } else {
-                        clear_batch(
-                            self.wezterm
-                                .iter()
-                                .flatten()
-                                .filter(|item| item.emitted)
-                                .map(|item| item.key.rect),
-                        )
-                    };
-                    return WeztermPreparation::Fallback(WeztermFrame {
-                        clear_terminal,
-                        before_draw,
+                    return KittyPreparation::Fallback(KittyFrame {
+                        before_draw: kitty_delete_batch(
+                            self.kitty.iter().flatten().filter(|item| item.emitted),
+                            self.kitty_tmux,
+                        ),
                         after_draw: Vec::new(),
                         next: [None, None],
                     });
                 }
             }
         }
-        if clear_terminal {
-            for placement in next.iter_mut().flatten() {
-                placement.emitted = false;
-            }
-        }
 
         let changed = |index: usize| {
-            self.wezterm[index].as_ref().map(|item| item.key)
-                != next[index].as_ref().map(|item| item.key)
+            resized
+                || self.kitty[index].as_ref().map(|item| item.key)
+                    != next[index].as_ref().map(|item| item.key)
         };
-        let before_draw = if clear_terminal {
-            Vec::new()
-        } else {
-            clear_batch((0..2).filter(|&index| changed(index)).filter_map(|index| {
-                self.wezterm[index]
-                    .as_ref()
-                    .filter(|item| item.emitted)
-                    .map(|item| item.key.rect)
-            }))
-        };
-        let after_draw = draw_batch(
+        let before_draw = kitty_delete_batch(
+            (0..2)
+                .filter(|&index| changed(index))
+                .filter_map(|index| self.kitty[index].as_ref().filter(|item| item.emitted)),
+            self.kitty_tmux,
+        );
+        let after_draw = kitty_draw_batch(
             (0..2)
                 .filter(|&index| {
                     changed(index) || next[index].as_ref().is_some_and(|item| !item.emitted)
@@ -414,56 +398,55 @@ impl GraphicsRuntime {
                 .filter_map(|index| next[index].as_ref()),
         );
 
-        WeztermPreparation::Ready(WeztermFrame {
-            clear_terminal,
+        KittyPreparation::Ready(KittyFrame {
             before_draw,
             after_draw,
             next,
         })
     }
 
-    /// 仅在清理、Ratatui 绘制和图片输出全部成功后提交下一帧状态。
-    pub fn commit_wezterm_frame(&mut self, mut frame: WeztermFrame, terminal_size: Size) {
+    /// 仅在删除、UI 绘制和 Kitty 输出均成功后提交图片状态。
+    pub fn commit_kitty_frame(&mut self, mut frame: KittyFrame, terminal_size: Size) {
         for placement in frame.next.iter_mut().flatten() {
             placement.emitted = true;
         }
-        self.wezterm = frame.next;
-        self.wezterm_terminal_size = Some(terminal_size);
+        self.kitty = frame.next;
+        self.kitty_terminal_size = Some(terminal_size);
     }
 
-    fn encode_wezterm(&mut self, key: ProtocolKey) -> Result<String, ProtocolFailure> {
-        #[cfg(test)]
-        if self.fail_card == Some(key.card) {
-            return Err(ProtocolFailure::Encoding);
-        }
+    /// 退出或终端恢复前删除所有由应用直接放置的 Kitty 图片。
+    pub fn shutdown_kitty(&mut self) -> Vec<u8> {
+        let bytes = kitty_delete_batch(
+            self.kitty.iter().flatten().filter(|item| item.emitted),
+            self.kitty_tmux,
+        );
+        self.kitty = [None, None];
+        bytes
+    }
+
+    fn encode_application_kitty(
+        &mut self,
+        key: ProtocolKey,
+    ) -> Result<KittyPlacement, ProtocolFailure> {
         let image = self
             .art
             .entry(key.card)
             .or_insert_with(|| generate_card_art(key.card))
             .clone();
-        let protocol = self
-            .picker
-            .as_ref()
-            .ok_or(ProtocolFailure::Encoding)?
-            .new_protocol(image, key.rect.as_size(), Resize::Fit(None))
-            .map_err(|_| ProtocolFailure::Encoding)?;
-        let Protocol::ITerm2(iterm2) = protocol else {
-            return Err(ProtocolFailure::UnsafeWeztermData);
-        };
-        if iterm2.is_tmux || iterm2.size != key.rect.as_size() {
-            return Err(ProtocolFailure::UnsafeWeztermData);
-        }
-        let prefix = iterm2_clear_prefix(iterm2.size);
-        let image = iterm2
-            .data
-            .strip_prefix(&prefix)
-            .filter(|data| data.starts_with("\x1b]1337;File=inline=1;") && data.ends_with('\x07'))
-            .ok_or(ProtocolFailure::UnsafeWeztermData)?;
+        let picker = self.picker.as_ref().ok_or(ProtocolFailure::Encoding)?;
+        let image = Resize::Fit(None).resize(&image, picker.font_size(), key.rect.as_size(), None);
+        let image_id = rand::random::<u32>().max(1);
+        let data = kitty_transmit(&image, image_id, key.rect.as_size(), self.kitty_tmux);
         #[cfg(test)]
         {
             self.encodes += 1;
         }
-        Ok(image.to_owned())
+        Ok(KittyPlacement {
+            key,
+            image_id,
+            data,
+            emitted: false,
+        })
     }
 
     #[cfg(test)]
@@ -543,8 +526,8 @@ impl GraphicsRuntime {
             .or_insert_with(|| generate_card_art(key.card))
             .clone();
         // UI 已用相同的 Resize::Fit 规则算出并居中了最终矩形；这里以该矩形
-        // 的尺寸编码，并在需要时把其原点加入 WezTerm 数据。
-        let mut protocol = self
+        // 的尺寸编码。Kitty 和 Sixel 的放置由 ratatui-image 统一管理。
+        let protocol = self
             .picker
             .as_ref()
             .expect("image backend retains picker")
@@ -554,9 +537,6 @@ impl GraphicsRuntime {
                 Resize::Fit(None),
             )
             .map_err(|_| ProtocolFailure::Encoding)?;
-        if self.environment.is_wezterm {
-            position_wezterm_protocol(&mut protocol, key.rect)?;
-        }
         let cached = Some(CachedProtocol { key, protocol });
         match slot {
             PreviewSlot::Selected => self.selected = cached,
@@ -575,88 +555,92 @@ impl GraphicsRuntime {
 enum ProtocolFailure {
     /// `ratatui-image` 无法编码图像。
     Encoding,
-    /// WezTerm 数据的变体、尺寸或转义序列不符合可安全包装的契约。
-    UnsafeWeztermData,
 }
 
-/// 为本地 WezTerm 的 iTerm2 数据增加绝对位置；tmux 保留上游行为。
-fn position_wezterm_protocol(protocol: &mut Protocol, rect: Rect) -> Result<(), ProtocolFailure> {
-    let Protocol::ITerm2(iterm2) = protocol else {
-        return Err(ProtocolFailure::UnsafeWeztermData);
-    };
-    if iterm2.is_tmux {
-        return Ok(());
-    }
-    if iterm2.size != Size::new(rect.width, rect.height) {
-        return Err(ProtocolFailure::UnsafeWeztermData);
-    }
+/// 使用 Kitty 基础协议传输并在当前光标位置直接放置图片。
+fn kitty_transmit(
+    image: &image::DynamicImage,
+    image_id: u32,
+    cells: Size,
+    is_tmux: bool,
+) -> Vec<u8> {
+    const RAW_CHUNK_SIZE: usize = 3072;
+    let rgba = image.to_rgba8();
+    let chunks = rgba.as_raw().chunks(RAW_CHUNK_SIZE);
+    let chunk_count = chunks.len();
+    let mut output = Vec::new();
 
-    let clear_prefix = iterm2_clear_prefix(iterm2.size);
-    let Some(image_data) = iterm2.data.strip_prefix(&clear_prefix) else {
-        return Err(ProtocolFailure::UnsafeWeztermData);
-    };
-    if !image_data.starts_with("\x1b]1337;File=inline=1;") || !image_data.ends_with('\x07') {
-        return Err(ProtocolFailure::UnsafeWeztermData);
+    for (index, chunk) in chunks.enumerate() {
+        let more = u8::from(index + 1 < chunk_count);
+        let control = if index == 0 {
+            format!(
+                "q=2,a=T,f=32,t=d,s={},v={},c={},r={},i={image_id},C=1,m={more}",
+                rgba.width(),
+                rgba.height(),
+                cells.width,
+                cells.height,
+            )
+        } else {
+            format!("q=2,m={more}")
+        };
+        let mut payload = String::new();
+        base64_simd::STANDARD.encode_append(chunk, &mut payload);
+        output.extend(kitty_apc(&control, Some(&payload), is_tmux));
     }
-
-    let anchor = absolute_cursor_position(rect.x, rect.y);
-    let next_cell = absolute_cursor_position(rect.x.saturating_add(1), rect.y);
-    iterm2.data = format!("{anchor}{}{next_cell}", iterm2.data);
-    Ok(())
+    output
 }
 
-/// 复制 v11.0.6 在非 tmux iTerm2 数据开头使用的透明区域清理序列。
-fn iterm2_clear_prefix(size: Size) -> String {
-    if size.height == 1 {
-        return format!("\x1b[{}X", size.width);
+/// 构造 Kitty APC，并在 tmux 中按 passthrough 规则转义内层 ESC。
+fn kitty_apc(control: &str, payload: Option<&str>, is_tmux: bool) -> Vec<u8> {
+    let mut raw = format!("\x1b_G{control}");
+    if let Some(payload) = payload {
+        raw.push(';');
+        raw.push_str(payload);
+    }
+    raw.push_str("\x1b\\");
+    if !is_tmux {
+        return raw.into_bytes();
     }
 
-    let mut prefix = String::new();
-    for _ in 0..size.height {
-        prefix.push_str(&format!("\x1b[{}X\x1b[1B", size.width));
-    }
-    prefix.push_str(&format!("\x1b[{}A", size.height));
-    prefix
+    let escaped = raw.replace('\x1b', "\x1b\x1b");
+    format!("\x1bPtmux;{escaped}\x1b\\").into_bytes()
 }
 
-/// 把 Ratatui 的零基单元格坐标转换成 CSI 的一基绝对坐标。
-fn absolute_cursor_position(x: u16, y: u16) -> String {
-    format!("\x1b[{};{}H", y.saturating_add(1), x.saturating_add(1))
-}
-
-/// 用绝对 CUP + ECH 清空若干旧矩形，并保护 Ratatui 的光标位置。
-fn clear_batch(rects: impl IntoIterator<Item = Rect>) -> Vec<u8> {
-    let mut body = String::new();
-    for rect in rects {
-        for row in 0..rect.height {
-            body.push_str(&absolute_cursor_position(
-                rect.x,
-                rect.y.saturating_add(row),
-            ));
-            body.push_str(&format!("\x1b[{}X", rect.width));
-        }
-    }
-    saved_cursor_batch(body)
-}
-
-/// 在目标左上角绝对定位后输出 OSC；CUP 必须紧邻每一段图片数据。
-fn draw_batch<'a>(placements: impl IntoIterator<Item = &'a WeztermPlacement>) -> Vec<u8> {
-    let mut body = String::new();
+fn kitty_delete_batch<'a>(
+    placements: impl IntoIterator<Item = &'a KittyPlacement>,
+    is_tmux: bool,
+) -> Vec<u8> {
+    let mut output = Vec::new();
     for placement in placements {
-        body.push_str(&absolute_cursor_position(
-            placement.key.rect.x,
-            placement.key.rect.y,
+        output.extend(kitty_apc(
+            &format!("q=2,a=d,d=I,i={}", placement.image_id),
+            None,
+            is_tmux,
         ));
-        body.push_str(&placement.image);
     }
-    saved_cursor_batch(body)
+    output
 }
 
-fn saved_cursor_batch(body: String) -> Vec<u8> {
+fn kitty_draw_batch<'a>(placements: impl IntoIterator<Item = &'a KittyPlacement>) -> Vec<u8> {
+    let mut body = Vec::new();
+    for placement in placements {
+        body.extend(
+            format!(
+                "\x1b[{};{}H",
+                placement.key.rect.y.saturating_add(1),
+                placement.key.rect.x.saturating_add(1)
+            )
+            .bytes(),
+        );
+        body.extend_from_slice(&placement.data);
+    }
     if body.is_empty() {
         Vec::new()
     } else {
-        format!("\x1b[s{body}\x1b[u").into_bytes()
+        let mut output = b"\x1b[s".to_vec();
+        output.extend(body);
+        output.extend_from_slice(b"\x1b[u");
+        output
     }
 }
 
@@ -752,43 +736,83 @@ mod tests {
     }
 
     #[test]
-    fn wezterm_precedes_windows_terminal_and_requires_iterm2() {
+    fn wezterm_precedes_windows_terminal_and_requires_kitty() {
         let environment = TerminalEnvironment {
             is_ssh: false,
             is_wezterm: true,
             is_windows_terminal: true,
         };
         assert_eq!(
-            resolve_backend(environment, Some(ProtocolType::Iterm2)),
-            GraphicsBackend::Iterm2
+            resolve_backend(environment, Some(ProtocolType::Kitty)),
+            GraphicsBackend::Kitty
         );
         assert_eq!(
-            resolve_backend(environment, Some(ProtocolType::Halfblocks)),
+            resolve_backend(environment, Some(ProtocolType::Iterm2)),
             GraphicsBackend::Text(FallbackReason::Unsupported)
         );
     }
 
     #[test]
-    fn wezterm_forces_iterm2_when_detection_falls_back_to_halfblocks() {
+    fn wezterm_forces_kitty_when_detection_falls_back_to_halfblocks() {
         let environment = TerminalEnvironment {
             is_ssh: false,
             is_wezterm: true,
             is_windows_terminal: false,
         };
-        let runtime = GraphicsRuntime::from_picker(environment, Some(Picker::halfblocks()));
+        let mut runtime = GraphicsRuntime::from_picker(environment, Some(Picker::halfblocks()));
+        runtime.kitty_tmux = false;
 
-        assert_eq!(runtime.detected_backend, GraphicsBackend::Iterm2);
+        assert_eq!(runtime.detected_backend, GraphicsBackend::Kitty);
         assert_eq!(
             runtime.picker.as_ref().map(Picker::protocol_type),
-            Some(ProtocolType::Iterm2)
+            Some(ProtocolType::Kitty)
         );
+
+        use crate::core::{Color, Rank};
+        assert!(runtime.uses_application_kitty());
+        let placement = PreviewPlacement {
+            card: Card::new(Color::Green, Rank::Number(2)),
+            rect: Rect::new(4, 7, 12, 7),
+        };
+        let KittyPreparation::Ready(first) =
+            runtime.prepare_kitty_frame(Size::new(80, 28), Some(placement), None)
+        else {
+            panic!("WezTerm Kitty encoding should succeed");
+        };
+        assert!(first.before_draw.is_empty());
+        let output = String::from_utf8(first.after_draw.clone()).unwrap();
+        assert!(output.contains("\x1b[8;5H\x1b_Gq=2,a=T,f=32"));
+        assert!(output.contains("c=12,r=7"));
+        assert!(!output.contains('\u{10eeee}'));
+        runtime.commit_kitty_frame(first, Size::new(80, 28));
+
+        let KittyPreparation::Ready(steady) =
+            runtime.prepare_kitty_frame(Size::new(80, 28), Some(placement), None)
+        else {
+            unreachable!();
+        };
+        assert!(steady.before_draw.is_empty());
+        assert!(steady.after_draw.is_empty());
+        runtime.commit_kitty_frame(steady, Size::new(80, 28));
+
+        let KittyPreparation::Ready(hidden) =
+            runtime.prepare_kitty_frame(Size::new(80, 28), None, None)
+        else {
+            unreachable!();
+        };
+        assert!(
+            String::from_utf8(hidden.before_draw.clone())
+                .unwrap()
+                .contains("a=d,d=I,i=")
+        );
+        assert!(hidden.after_draw.is_empty());
     }
 
     #[test]
     fn fitting_does_not_encode_and_stays_within_available_size() {
         use crate::core::{Color, Rank};
 
-        let mut runtime = GraphicsRuntime::with_protocol_for_tests(ProtocolType::Iterm2);
+        let mut runtime = GraphicsRuntime::with_protocol_for_tests(ProtocolType::Kitty);
         let fitted = runtime
             .fit_size(Card::new(Color::Green, Rank::Number(2)), Size::new(12, 7))
             .expect("image backend should calculate a fitted size");
@@ -798,36 +822,6 @@ mod tests {
         assert!(fitted.width > 0);
         assert!(fitted.height > 0);
         assert_eq!(runtime.encodes, 0);
-    }
-
-    #[test]
-    fn wezterm_iterm2_data_anchors_before_clearing_and_restores_next_cell() {
-        use crate::core::{Color, Rank};
-
-        let environment = TerminalEnvironment {
-            is_wezterm: true,
-            ..TerminalEnvironment::default()
-        };
-        let mut runtime = GraphicsRuntime::from_picker(environment, Some(Picker::halfblocks()));
-        let card = Card::new(Color::Green, Rank::Number(2));
-        let size = runtime
-            .fit_size(card, Size::new(12, 7))
-            .expect("WezTerm should calculate an image size");
-        let rect = Rect::new(4, 7, size.width, size.height);
-        let protocol = runtime
-            .protocol(PreviewSlot::Selected, card, rect)
-            .expect("WezTerm should retain its iTerm2 protocol");
-        let Protocol::ITerm2(iterm2) = protocol else {
-            panic!("WezTerm should encode an iTerm2 image");
-        };
-
-        let anchor = "\x1b[8;5H";
-        let next_cell = "\x1b[8;6H";
-        let clear_row = format!("\x1b[{}X\x1b[1B", iterm2.size.width);
-        let return_to_top = format!("\x1b[{}A\x1b]1337;", iterm2.size.height);
-        assert!(iterm2.data.starts_with(&format!("{anchor}{clear_row}")));
-        assert!(iterm2.data.contains(&return_to_top));
-        assert!(iterm2.data.ends_with(next_cell));
     }
 
     #[test]
@@ -857,13 +851,17 @@ mod tests {
             resolve_backend(environment, Some(ProtocolType::Halfblocks)),
             GraphicsBackend::Text(FallbackReason::Unsupported)
         );
+        assert_eq!(
+            resolve_backend(environment, Some(ProtocolType::Iterm2)),
+            GraphicsBackend::Text(FallbackReason::Unsupported)
+        );
     }
 
     #[test]
     fn preview_slots_are_position_aware_and_reuse_only_unchanged_rectangles() {
         use crate::core::{Color, Rank};
 
-        let mut runtime = GraphicsRuntime::with_protocol_for_tests(ProtocolType::Iterm2);
+        let mut runtime = GraphicsRuntime::with_protocol_for_tests(ProtocolType::Kitty);
         let card = Card::new(Color::Blue, Rank::Number(7));
         let rect = Rect::new(3, 4, 12, 7);
 
@@ -902,341 +900,5 @@ mod tests {
                 .is_some()
         );
         assert_eq!(runtime.encodes, 5);
-    }
-
-    #[test]
-    fn wezterm_slots_embed_their_own_positions_even_for_the_same_card() {
-        use crate::core::{Color, Rank};
-
-        let environment = TerminalEnvironment {
-            is_wezterm: true,
-            ..TerminalEnvironment::default()
-        };
-        let mut runtime = GraphicsRuntime::from_picker(environment, Some(Picker::halfblocks()));
-        let card = Card::new(Color::Yellow, Rank::Number(5));
-        let size = runtime
-            .fit_size(card, Size::new(12, 7))
-            .expect("WezTerm should calculate an image size");
-        let selected_rect = Rect::new(2, 3, size.width, size.height);
-        let discard_rect = Rect::new(42, 3, size.width, size.height);
-
-        let selected_data = match runtime
-            .protocol(PreviewSlot::Selected, card, selected_rect)
-            .expect("selected preview should encode")
-        {
-            Protocol::ITerm2(iterm2) => iterm2.data.clone(),
-            _ => panic!("WezTerm should use iTerm2"),
-        };
-        let discard_data = match runtime
-            .protocol(PreviewSlot::Discard, card, discard_rect)
-            .expect("discard preview should encode")
-        {
-            Protocol::ITerm2(iterm2) => iterm2.data.clone(),
-            _ => panic!("WezTerm should use iTerm2"),
-        };
-
-        assert!(selected_data.starts_with("\x1b[4;3H"));
-        assert!(selected_data.ends_with("\x1b[4;4H"));
-        assert!(discard_data.starts_with("\x1b[4;43H"));
-        assert!(discard_data.ends_with("\x1b[4;44H"));
-        assert_eq!(runtime.cached_preview_count(), 2);
-        assert_eq!(runtime.encodes, 2);
-    }
-
-    #[test]
-    fn non_wezterm_protocols_and_tmux_data_are_not_wrapped() {
-        use crate::core::{Color, Rank};
-        use ratatui_image::protocol::iterm2::Iterm2;
-
-        let card = Card::new(Color::Red, Rank::Number(3));
-        let rect = Rect::new(6, 8, 10, 7);
-        let mut ordinary_iterm2 = GraphicsRuntime::with_protocol_for_tests(ProtocolType::Iterm2);
-        let protocol = ordinary_iterm2
-            .protocol(PreviewSlot::Selected, card, rect)
-            .expect("ordinary iTerm2 should encode");
-        let Protocol::ITerm2(iterm2) = protocol else {
-            panic!("expected iTerm2 data");
-        };
-        assert!(iterm2.data.starts_with("\x1b["));
-        assert!(!iterm2.data.starts_with("\x1b[9;7H"));
-
-        let mut sixel = GraphicsRuntime::with_protocol_for_tests(ProtocolType::Sixel);
-        assert!(matches!(
-            sixel.protocol(PreviewSlot::Selected, card, rect),
-            Some(Protocol::Sixel(_))
-        ));
-        let mut kitty = GraphicsRuntime::with_protocol_for_tests(ProtocolType::Kitty);
-        assert!(matches!(
-            kitty.protocol(PreviewSlot::Selected, card, rect),
-            Some(Protocol::Kitty(_))
-        ));
-
-        let mut tmux = Protocol::ITerm2(Iterm2 {
-            data: "upstream tmux data".to_owned(),
-            size: Size::new(rect.width, rect.height),
-            is_tmux: true,
-        });
-        position_wezterm_protocol(&mut tmux, rect).expect("tmux should bypass wrapping");
-        let Protocol::ITerm2(tmux) = tmux else {
-            unreachable!();
-        };
-        assert_eq!(tmux.data, "upstream tmux data");
-
-        let mut text = GraphicsRuntime::text_for_tests();
-        assert_eq!(text.fit_size(card, rect.as_size()), None);
-        assert!(text.protocol(PreviewSlot::Selected, card, rect).is_none());
-    }
-
-    #[test]
-    fn malformed_wezterm_data_is_rejected_without_modification() {
-        use ratatui_image::protocol::iterm2::Iterm2;
-
-        let rect = Rect::new(2, 3, 10, 7);
-        let malformed = "\x1b]1337;File=inline=1;missing-clear-prefix\x07".to_owned();
-        let mut protocol = Protocol::ITerm2(Iterm2 {
-            data: malformed.clone(),
-            size: rect.as_size(),
-            is_tmux: false,
-        });
-
-        assert_eq!(
-            position_wezterm_protocol(&mut protocol, rect),
-            Err(ProtocolFailure::UnsafeWeztermData)
-        );
-        let Protocol::ITerm2(iterm2) = protocol else {
-            unreachable!();
-        };
-        assert_eq!(iterm2.data, malformed);
-    }
-
-    #[test]
-    fn unsafe_wezterm_protocol_stably_falls_back_and_clears_both_slots() {
-        use crate::core::{Color, Rank};
-
-        let environment = TerminalEnvironment {
-            is_wezterm: true,
-            ..TerminalEnvironment::default()
-        };
-        let mut runtime = GraphicsRuntime::from_picker(environment, Some(Picker::halfblocks()));
-        let card = Card::new(Color::Blue, Rank::Number(1));
-        let size = runtime
-            .fit_size(card, Size::new(12, 7))
-            .expect("WezTerm should calculate an image size");
-        assert!(
-            runtime
-                .protocol(
-                    PreviewSlot::Selected,
-                    card,
-                    Rect::new(2, 3, size.width, size.height),
-                )
-                .is_some()
-        );
-        assert_eq!(runtime.cached_preview_count(), 1);
-
-        runtime
-            .picker
-            .as_mut()
-            .expect("image backend retains picker")
-            .set_protocol_type(ProtocolType::Sixel);
-        assert!(
-            runtime
-                .protocol(
-                    PreviewSlot::Discard,
-                    card,
-                    Rect::new(42, 3, size.width, size.height),
-                )
-                .is_none()
-        );
-        assert_eq!(
-            runtime.detected_backend,
-            GraphicsBackend::Text(FallbackReason::Encoding)
-        );
-        assert!(runtime.picker.is_none());
-        assert_eq!(runtime.cached_preview_count(), 0);
-
-        let encodes_after_failure = runtime.encodes;
-        assert!(
-            runtime
-                .protocol(
-                    PreviewSlot::Discard,
-                    card,
-                    Rect::new(42, 3, size.width, size.height),
-                )
-                .is_none()
-        );
-        assert_eq!(runtime.encodes, encodes_after_failure);
-    }
-
-    fn application_wezterm_for_tests() -> GraphicsRuntime {
-        let environment = TerminalEnvironment {
-            is_wezterm: true,
-            ..TerminalEnvironment::default()
-        };
-        let mut runtime = GraphicsRuntime::from_picker(environment, Some(Picker::halfblocks()));
-        runtime.application_wezterm = true;
-        runtime
-    }
-
-    fn ready(preparation: WeztermPreparation) -> WeztermFrame {
-        match preparation {
-            WeztermPreparation::Ready(frame) => frame,
-            WeztermPreparation::Fallback(_) => panic!("expected an encoded WezTerm frame"),
-        }
-    }
-
-    fn fitted_placement(
-        runtime: &mut GraphicsRuntime,
-        card: Card,
-        x: u16,
-        y: u16,
-        available: Size,
-    ) -> PreviewPlacement {
-        let size = runtime.fit_size(card, available).expect("image should fit");
-        PreviewPlacement {
-            card,
-            rect: Rect::new(x, y, size.width, size.height),
-        }
-    }
-
-    #[test]
-    fn wezterm_lifecycle_distinguishes_add_steady_replace_move_and_delete() {
-        use crate::core::{Color, Rank};
-
-        let mut runtime = application_wezterm_for_tests();
-        let size = Size::new(100, 28);
-        let left = fitted_placement(
-            &mut runtime,
-            Card::new(Color::Blue, Rank::Number(1)),
-            18,
-            8,
-            Size::new(12, 7),
-        );
-        let right = fitted_placement(
-            &mut runtime,
-            Card::new(Color::Red, Rank::Number(2)),
-            68,
-            8,
-            Size::new(12, 7),
-        );
-
-        let first = ready(runtime.prepare_wezterm_frame(size, Some(left), Some(right)));
-        assert!(first.before_draw.is_empty());
-        let first_draw = String::from_utf8(first.after_draw.clone()).unwrap();
-        assert!(first_draw.contains("\x1b[9;19H\x1b]1337;"));
-        assert!(first_draw.contains("\x1b[9;69H\x1b]1337;"));
-        runtime.commit_wezterm_frame(first, size);
-
-        let steady = ready(runtime.prepare_wezterm_frame(size, Some(left), Some(right)));
-        assert!(steady.before_draw.is_empty());
-        assert!(steady.after_draw.is_empty());
-        runtime.commit_wezterm_frame(steady, size);
-
-        let replacement = PreviewPlacement {
-            card: Card::new(Color::Green, Rank::Skip),
-            ..left
-        };
-        let replaced = ready(runtime.prepare_wezterm_frame(size, Some(replacement), Some(right)));
-        let clear = String::from_utf8(replaced.before_draw.clone()).unwrap();
-        let draw = String::from_utf8(replaced.after_draw.clone()).unwrap();
-        assert!(clear.contains(&format!("\x1b[9;19H\x1b[{}X", left.rect.width)));
-        assert!(!clear.contains("\x1b[9;69H"));
-        assert!(draw.contains("\x1b[9;19H\x1b]1337;"));
-        assert!(!draw.contains("\x1b[9;69H"));
-        runtime.commit_wezterm_frame(replaced, size);
-
-        let moved = fitted_placement(&mut runtime, replacement.card, 20, 9, Size::new(10, 6));
-        let moved_frame = ready(runtime.prepare_wezterm_frame(size, Some(moved), Some(right)));
-        let clear = String::from_utf8(moved_frame.before_draw.clone()).unwrap();
-        let draw = String::from_utf8(moved_frame.after_draw.clone()).unwrap();
-        assert!(clear.contains(&format!("\x1b[9;19H\x1b[{}X", replacement.rect.width)));
-        assert!(draw.contains("\x1b[10;21H\x1b]1337;"));
-        runtime.commit_wezterm_frame(moved_frame, size);
-
-        let hidden = ready(runtime.prepare_wezterm_frame(size, None, Some(right)));
-        assert!(!hidden.before_draw.is_empty());
-        assert!(hidden.after_draw.is_empty());
-        runtime.commit_wezterm_frame(hidden, size);
-    }
-
-    #[test]
-    fn wezterm_resize_full_clears_and_redraws_both_unchanged_slots() {
-        use crate::core::{Color, Rank};
-
-        let mut runtime = application_wezterm_for_tests();
-        let left = fitted_placement(
-            &mut runtime,
-            Card::new(Color::Yellow, Rank::Number(3)),
-            10,
-            8,
-            Size::new(12, 7),
-        );
-        let right = fitted_placement(
-            &mut runtime,
-            Card::new(Color::Blue, Rank::DrawTwo),
-            50,
-            8,
-            Size::new(12, 7),
-        );
-        let first =
-            ready(runtime.prepare_wezterm_frame(Size::new(100, 28), Some(left), Some(right)));
-        runtime.commit_wezterm_frame(first, Size::new(100, 28));
-
-        let resized =
-            ready(runtime.prepare_wezterm_frame(Size::new(159, 41), Some(left), Some(right)));
-        assert!(resized.clear_terminal);
-        assert!(resized.before_draw.is_empty());
-        assert_eq!(
-            String::from_utf8_lossy(&resized.after_draw)
-                .matches("\x1b]1337;")
-                .count(),
-            2
-        );
-    }
-
-    #[test]
-    fn wezterm_second_slot_encoding_failure_emits_no_partial_update() {
-        use crate::core::{Color, Rank};
-
-        let mut runtime = application_wezterm_for_tests();
-        let size = Size::new(100, 28);
-        let old_left = fitted_placement(
-            &mut runtime,
-            Card::new(Color::Blue, Rank::Number(4)),
-            15,
-            8,
-            Size::new(12, 7),
-        );
-        let old_right = fitted_placement(
-            &mut runtime,
-            Card::new(Color::Red, Rank::Number(5)),
-            65,
-            8,
-            Size::new(12, 7),
-        );
-        let first = ready(runtime.prepare_wezterm_frame(size, Some(old_left), Some(old_right)));
-        runtime.commit_wezterm_frame(first, size);
-
-        let new_left = PreviewPlacement {
-            card: Card::new(Color::Green, Rank::Number(6)),
-            ..old_left
-        };
-        let new_right = PreviewPlacement {
-            card: Card::new(Color::Yellow, Rank::Reverse),
-            ..old_right
-        };
-        runtime.fail_card = Some(new_right.card);
-        let WeztermPreparation::Fallback(fallback) =
-            runtime.prepare_wezterm_frame(size, Some(new_left), Some(new_right))
-        else {
-            panic!("second slot should fail the complete frame");
-        };
-        assert!(fallback.after_draw.is_empty());
-        let clear = String::from_utf8(fallback.before_draw.clone()).unwrap();
-        assert!(clear.contains(&format!("\x1b[9;16H\x1b[{}X", old_left.rect.width)));
-        assert!(clear.contains(&format!("\x1b[9;66H\x1b[{}X", old_right.rect.width)));
-        assert_eq!(
-            runtime.detected_backend,
-            GraphicsBackend::Text(FallbackReason::Encoding)
-        );
     }
 }

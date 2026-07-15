@@ -131,7 +131,7 @@ ratatui-image = { path = "external/ratatui-image" }
 - 终端小于 `70 × 22` 时，程序只显示调整窗口大小的提示。
 - 图像牌面要求终端至少为 `70 × 26`；不满足条件时仍可使用完整的文本界面。
 - 设置页提供 `Text` 和 `Graphics (Beta)`；只有 Windows Terminal（包括 WSL）默认选择 Beta，WezTerm 和其他终端默认选择 Text。
-- 任一本地终端都可手动选择 `Graphics (Beta)` 尝试已探测到的 iTerm2、Sixel 或 Kitty 协议；选择 `Text` 会完全禁用图像输出。
+- 任一本地终端都可手动选择 `Graphics (Beta)` 尝试已探测到的 Kitty 或 Sixel 协议；iTerm2 已弃用并会安全回退到文字，选择 `Text` 会完全禁用图像输出。
 - SSH 会话会自动使用文本牌面，避免图像协议转义序列干扰远程终端。
 - 按 `Ctrl+C`、正常退出或发生 panic 时，程序都会尝试恢复终端的原始模式、光标和备用屏幕状态。
 

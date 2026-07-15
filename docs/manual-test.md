@@ -1,6 +1,6 @@
 # Local TUI Manual Test
 
-Automated tests validate backend resolution, generated pixels, caching, responsive layout, and overlay invalidation with Ratatui's test backend. Native iTerm2/Sixel placement, ConPTY behavior, GPU rendering, and cross-platform terminal cleanup remain platform-only checks covered by the matrix below and by the existing cargo-dist release jobs.
+Automated tests validate backend resolution, generated pixels, caching, responsive layout, and overlay invalidation with Ratatui's test backend. Native Kitty/Sixel placement, ConPTY behavior, GPU rendering, and cross-platform terminal cleanup remain platform-only checks covered by the matrix below and by the existing cargo-dist release jobs.
 
 ## Launch and setup
 
@@ -38,8 +38,8 @@ Automated tests validate backend resolution, generated pixels, caching, responsi
 
 ## Card graphics
 
-1. Start locally in Windows WezTerm at exactly 70 × 26; confirm Setup defaults to `Text` and emits no card images even though WezTerm supports iTerm2.
-2. Select `Graphics (Beta)` and confirm Setup reports `Graphics (Beta) (iTerm2)` and both the selected hand card and discard top are wholly inside their own panels. Repeat in a normal-sized window and at 159 × 41 with 192 DPI scaling; confirm both images are centered and opposite gaps differ by at most one terminal cell.
+1. Start locally in Windows WezTerm at exactly 70 × 26; confirm Setup defaults to `Text` and emits no card images even though WezTerm supports Kitty.
+2. Select `Graphics (Beta)` and confirm Setup reports `Graphics (Beta) (Kitty)`, both cards render as images rather than U+10EEEE/combining-mark placeholder glyphs, and both are wholly inside their own panels. Repeat in a normal-sized window and at 159 × 41 with 192 DPI scaling; confirm both images are centered and opposite gaps differ by at most one terminal cell.
 3. Select several cards, play a card, draw a card, and start a new match. Confirm the selected and discard images stay in their respective panels and do not drift when their card contents change.
 4. Resize WezTerm repeatedly, including transitions across 70 × 25 and 70 × 26. Confirm text/image mode changes cleanly, centered positions recompute, and old images leave no residue.
 5. Open and close Help, quit confirmation, the wild-color picker, and the result screen in WezTerm; confirm images never cover an overlay and return at the correct positions afterward.
@@ -49,6 +49,7 @@ Automated tests validate backend resolution, generated pixels, caching, responsi
 9. Set only `SSH_AUTH_SOCK` in a local shell; confirm it does not force the SSH fallback.
 10. In Linux, macOS, and a Windows console other than Windows Terminal, confirm Setup defaults to `Text`; manually select `Graphics (Beta)` and confirm a supported detected backend is used or an explicit text fallback is reported.
 11. Select `Graphics: Text`; confirm Setup reports `Text` and no image is rendered at any terminal size, including 70 × 26 and 159 × 41.
+12. In an environment that reports only iTerm2 support, select `Graphics (Beta)` and confirm the application reports the unsupported text fallback without emitting iTerm2 escape sequences.
 
 ## Localization
 

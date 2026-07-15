@@ -40,19 +40,19 @@ pub struct PreviewPlan {
     pub terminal_size: Size,
     pub screen: Screen,
     pub images_visible: bool,
-    pub application_wezterm: bool,
+    pub application_kitty: bool,
     pub selected: Option<PreviewPlacement>,
     pub discard: Option<PreviewPlacement>,
 }
 
 /// 根据应用状态、终端尺寸和拟合结果，在任何终端输出前生成最终目标矩形。
 pub fn preview_plan(app: &App, area: Rect, graphics: &mut GraphicsRuntime) -> PreviewPlan {
-    let application_wezterm = graphics.uses_wezterm_placement();
+    let application_kitty = graphics.uses_application_kitty();
     let mut plan = PreviewPlan {
         terminal_size: area.as_size(),
         screen: app.screen,
         images_visible: false,
-        application_wezterm,
+        application_kitty,
         selected: None,
         discard: None,
     };
@@ -730,8 +730,8 @@ fn render_card_preview(
         debug_assert!(placement.rect.x >= area.x && placement.rect.y >= area.y);
         debug_assert!(placement.rect.right() <= area.right());
         debug_assert!(placement.rect.bottom() <= area.bottom());
-        if plan.application_wezterm {
-            // WezTerm 图片在 Ratatui flush 后单独输出；这里只清空并保留同一目标矩形。
+        if plan.application_kitty {
+            // WezTerm 不支持 Unicode placeholder；Ratatui 保留区域后由主循环直接放置。
             frame.render_widget(Clear, placement.rect);
             return;
         }
@@ -1072,7 +1072,7 @@ mod tests {
             true,
             Screen::Game,
             false,
-            GraphicsBackend::Iterm2,
+            GraphicsBackend::Kitty,
         ));
         assert!(should_render_images(
             Rect::new(0, 0, 70, 26),
@@ -1109,7 +1109,7 @@ mod tests {
         );
         app.setup.bot_count = 1;
         app.start_match().unwrap();
-        let mut graphics = GraphicsRuntime::with_protocol_for_tests(ProtocolType::Iterm2);
+        let mut graphics = GraphicsRuntime::with_protocol_for_tests(ProtocolType::Kitty);
 
         draw_with_graphics(&mut terminal, &app, &mut graphics);
         assert_eq!(graphics.cached_preview_count(), 0);
@@ -1154,7 +1154,7 @@ mod tests {
             Card::new(Color::Blue, Rank::Number(7)),
             Card::new(Color::Red, Rank::DrawTwo),
         ];
-        let mut graphics = GraphicsRuntime::with_protocol_for_tests(ProtocolType::Iterm2);
+        let mut graphics = GraphicsRuntime::with_protocol_for_tests(ProtocolType::Kitty);
 
         let image_rects = panels
             .into_iter()
@@ -1192,7 +1192,7 @@ mod tests {
         );
         app.setup.bot_count = 1;
         app.start_match().unwrap();
-        let mut graphics = GraphicsRuntime::with_protocol_for_tests(ProtocolType::Iterm2);
+        let mut graphics = GraphicsRuntime::with_protocol_for_tests(ProtocolType::Kitty);
 
         for area in [Rect::new(0, 0, 70, 26), Rect::new(0, 0, 159, 41)] {
             let plan = preview_plan(&app, area, &mut graphics);

@@ -6,6 +6,7 @@ repository = "https://github.com/Mcas-996/uno_online"
 version = "1.1.0"
 
 [dependencies]
+base64-simd = "0.8.0"
 crossterm = "0.29.0"
 image = { version = "0.25.6", default-features = false }
 rand = "0.8.5"
