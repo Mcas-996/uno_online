@@ -1410,6 +1410,45 @@ mod tests {
     }
 
     #[test]
+    fn g_plays_thirty_two_wild_draw_sixteens_for_a_five_hundred_twelve_penalty() {
+        let mut app = App::new(Language::English);
+        app.setup.bot_count = 1;
+        app.setup.deck_variant = DeckVariant::Standard;
+        app.start_match().unwrap();
+        let human = app.human_ids[0].clone();
+        let target = app.ai_ids[0].clone();
+        let target_before = app.game.as_ref().unwrap().hand_for(&target).unwrap().len();
+        app.game.as_mut().unwrap().set_test_turn(
+            &human,
+            vec![Card::wild(Rank::WildDrawSixteen); 32],
+            Card::new(Color::Red, Rank::Number(5)),
+        );
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE), 80);
+
+        assert_eq!(
+            app.pending_plus_batch
+                .as_ref()
+                .map(|pending| pending.plays.len()),
+            Some(32)
+        );
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), 80);
+
+        assert!(app.pending_plus_batch.is_none());
+        assert!(app.human_hand(0).unwrap().is_empty());
+        assert_eq!(
+            app.game.as_ref().unwrap().hand_for(&target).unwrap().len(),
+            target_before + 512
+        );
+        assert!(
+            app.logs
+                .back()
+                .unwrap()
+                .contains("auto-played 32 plus cards")
+        );
+    }
+
+    #[test]
     fn seven_picker_supports_keyboard_cancel_confirm_and_command_play() {
         let mut app = App::new(Language::English);
         app.setup.bot_count = 2;

@@ -1229,9 +1229,13 @@ fn best_plus_suffix(
     }
 
     let mut best = Vec::new();
+    let mut considered_cards = BTreeSet::new();
     for (candidate_index, candidate) in candidates.iter().copied().enumerate() {
         let bit = 1_u64 << candidate_index;
-        if used & bit != 0 || !plus_card_is_playable(active_color, top, candidate.play.card) {
+        if used & bit != 0
+            || !considered_cards.insert(candidate.play.card)
+            || !plus_card_is_playable(active_color, top, candidate.play.card)
+        {
             continue;
         }
         let colors: &[Color] = if candidate.play.card.rank == Rank::WildDrawSixteen {
@@ -1915,6 +1919,41 @@ mod tests {
             plays[wild_index].chosen_color,
             plays[wild_index + 1].card.color
         );
+    }
+
+    #[test]
+    fn plus_batch_planner_handles_thirty_two_wild_draw_sixteens() {
+        let mut game = game();
+        let current = game.current_player().clone();
+        let target = game.players[1].id.clone();
+        let wild = Card::wild(Rank::WildDrawSixteen);
+        game.set_test_turn(
+            &current,
+            vec![wild; 32],
+            Card::new(Color::Red, Rank::Number(5)),
+        );
+        let target_before = game.hand_for(&target).unwrap().len();
+
+        let mut plays = game.best_plus_batch(&current).unwrap();
+
+        assert_eq!(plays.len(), 32);
+        assert!(plays[..31].iter().all(|play| play.chosen_color.is_some()));
+        assert_eq!(plays[31].chosen_color, None);
+        plays[31].chosen_color = Some(Color::Blue);
+
+        let event = game.apply_plus_batch(&current, plays).unwrap();
+
+        assert_eq!(game.hand_for(&target).unwrap().len(), target_before + 512);
+        assert!(matches!(
+            event.kind,
+            EventKind::PlusBatchPlayed {
+                cards,
+                penalty: 512,
+                drawn: 512,
+                final_color: Color::Blue,
+                ..
+            } if cards.len() == 32
+        ));
     }
 
     #[test]
