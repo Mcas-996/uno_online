@@ -359,6 +359,10 @@ impl Language {
                 Self::English => "Choose a color",
                 Self::Chinese => "请选择颜色",
             },
+            GameError::InvalidNumberBatchColor(_) => match self {
+                Self::English => "Choose a color from the cards being played",
+                Self::Chinese => "请选择本批出牌中包含的颜色",
+            },
             GameError::MissingSwapTarget => match self {
                 Self::English => "Choose a player to swap hands with",
                 Self::Chinese => "请选择交换手牌的玩家",

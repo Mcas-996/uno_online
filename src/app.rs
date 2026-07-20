@@ -2,7 +2,7 @@
 //!
 //! Setup, input, local turns, and Holiday color selection.
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::time::{Duration, Instant};
 
 use crate::ai::{Difficulty, choose_action};
@@ -108,16 +108,18 @@ impl Setup {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct PendingWild {
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PendingColor {
     pub player_index: usize,
     pub card: Card,
+    pub colors: Vec<Color>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PendingSeven {
     pub player_index: usize,
     pub card: Card,
+    pub chosen_color: Option<Color>,
     pub targets: Vec<PlayerId>,
     pub selected_target: usize,
 }
@@ -139,7 +141,7 @@ pub struct App {
     pub hand_filter: HandFilter,
     pub command_mode: bool,
     pub command: String,
-    pub pending_wild: Option<PendingWild>,
+    pub pending_color: Option<PendingColor>,
     pub pending_seven: Option<PendingSeven>,
     pub pending_plus_batch: Option<PendingPlusBatch>,
     pub selected_color: usize,
@@ -170,7 +172,7 @@ impl App {
             hand_filter: HandFilter::All,
             command_mode: false,
             command: String::new(),
-            pending_wild: None,
+            pending_color: None,
             pending_seven: None,
             pending_plus_batch: None,
             selected_color: 0,
@@ -235,7 +237,7 @@ impl App {
         self.selected_cards = [0; 2];
         self.hand_filter = HandFilter::All;
         self.command_mode = false;
-        self.pending_wild = None;
+        self.pending_color = None;
         self.pending_seven = None;
         self.pending_plus_batch = None;
         self.logs.clear();
@@ -277,7 +279,7 @@ impl App {
 
     pub fn tick(&mut self) {
         if self.screen != Screen::Game
-            || self.pending_wild.is_some()
+            || self.pending_color.is_some()
             || self.pending_seven.is_some()
             || self.pending_plus_batch.is_some()
             || self.command_mode
@@ -414,7 +416,7 @@ impl App {
             self.handle_command_key(key);
             return;
         }
-        if self.pending_wild.is_some() {
+        if self.pending_color.is_some() {
             self.handle_color_key(key);
             return;
         }
@@ -538,28 +540,47 @@ impl App {
     }
 
     fn handle_color_key(&mut self, key: KeyEvent) {
-        let Some(pending) = self.pending_wild else {
+        let Some(pending) = self.pending_color.as_ref() else {
             return;
         };
+        let player_index = pending.player_index;
+        let color_count = pending.colors.len();
         let navigation = self
             .player_navigation(key)
-            .filter(|(player_index, _)| *player_index == pending.player_index)
+            .filter(|(candidate, _)| *candidate == player_index)
             .map(|(_, code)| code)
             .unwrap_or(key.code);
         match navigation {
             KeyCode::Left => self.selected_color = self.selected_color.saturating_sub(1),
-            KeyCode::Right => self.selected_color = (self.selected_color + 1).min(3),
-            KeyCode::Esc => self.pending_wild = None,
+            KeyCode::Right => {
+                self.selected_color = (self.selected_color + 1).min(color_count.saturating_sub(1))
+            }
+            KeyCode::Esc => self.pending_color = None,
             KeyCode::Enter => {
-                if let Some(pending) = self.pending_wild.take() {
-                    self.submit_human(
-                        pending.player_index,
-                        Action::Play {
-                            card: pending.card,
-                            chosen_color: Some(Color::ALL[self.selected_color]),
-                            swap_target: None,
-                        },
-                    );
+                if let Some(pending) = self.pending_color.take()
+                    && let Some(chosen_color) = pending.colors.get(self.selected_color).copied()
+                {
+                    if self
+                        .game
+                        .as_ref()
+                        .is_some_and(|game| game.house_rules().seven_zero)
+                        && pending.card.rank == Rank::Number(7)
+                    {
+                        self.begin_seven_target(
+                            pending.player_index,
+                            pending.card,
+                            Some(chosen_color),
+                        );
+                    } else {
+                        self.submit_human(
+                            pending.player_index,
+                            Action::Play {
+                                card: pending.card,
+                                chosen_color: Some(chosen_color),
+                                swap_target: None,
+                            },
+                        );
+                    }
                 }
             }
             _ => {}
@@ -658,7 +679,7 @@ impl App {
                         pending.player_index,
                         Action::Play {
                             card: pending.card,
-                            chosen_color: None,
+                            chosen_color: pending.chosen_color,
                             swap_target: Some(target),
                         },
                     );
@@ -684,8 +705,34 @@ impl App {
             self.status = self.language.text(Message::InvalidCardIndex).to_owned();
             return;
         };
-        if card.is_wild() {
-            self.pending_wild = Some(PendingWild { player_index, card });
+        let selectable_colors = if card.is_wild() {
+            Color::ALL.to_vec()
+        } else {
+            let player = &self.human_ids[player_index];
+            self.game
+                .as_ref()
+                .expect("game screen has game")
+                .legal_actions(player)
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(|action| match action {
+                    Action::Play {
+                        card: candidate,
+                        chosen_color,
+                        ..
+                    } if candidate == card => chosen_color,
+                    _ => None,
+                })
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect()
+        };
+        if !selectable_colors.is_empty() {
+            self.pending_color = Some(PendingColor {
+                player_index,
+                card,
+                colors: selectable_colors,
+            });
             self.selected_color = 0;
         } else if self
             .game
@@ -693,23 +740,7 @@ impl App {
             .is_some_and(|game| game.house_rules().seven_zero)
             && card.rank == Rank::Number(7)
         {
-            let current = self.human_ids[player_index].clone();
-            let targets = self
-                .game
-                .as_ref()
-                .expect("game screen has game")
-                .public_state()
-                .players
-                .into_iter()
-                .filter(|player| player.id != current)
-                .map(|player| player.id)
-                .collect();
-            self.pending_seven = Some(PendingSeven {
-                player_index,
-                card,
-                targets,
-                selected_target: 0,
-            });
+            self.begin_seven_target(player_index, card, None);
         } else {
             self.submit_human(
                 player_index,
@@ -720,6 +751,27 @@ impl App {
                 },
             );
         }
+    }
+
+    fn begin_seven_target(&mut self, player_index: usize, card: Card, chosen_color: Option<Color>) {
+        let current = self.human_ids[player_index].clone();
+        let targets = self
+            .game
+            .as_ref()
+            .expect("game screen has game")
+            .public_state()
+            .players
+            .into_iter()
+            .filter(|player| player.id != current)
+            .map(|player| player.id)
+            .collect();
+        self.pending_seven = Some(PendingSeven {
+            player_index,
+            card,
+            chosen_color,
+            targets,
+            selected_target: 0,
+        });
     }
 
     fn submit_current_human(&mut self, action: Action) {
@@ -909,7 +961,7 @@ impl App {
         self.game = None;
         self.screen = Screen::Setup;
         self.command_mode = false;
-        self.pending_wild = None;
+        self.pending_color = None;
         self.pending_seven = None;
         self.pending_plus_batch = None;
         self.logs.clear();
@@ -1221,6 +1273,60 @@ mod tests {
     }
 
     #[test]
+    fn multicolor_number_batch_prompts_with_only_batch_colors_and_uses_the_choice() {
+        let mut app = App::new(Language::English);
+        app.setup.bot_count = 1;
+        app.start_match().unwrap();
+        let human = app.human_ids[0].clone();
+        let blue_five = Card::new(Color::Blue, Rank::Number(5));
+        let green_five = Card::new(Color::Green, Rank::Number(5));
+        let remaining = Card::new(Color::Yellow, Rank::Number(8));
+        app.game.as_mut().unwrap().set_test_turn(
+            &human,
+            vec![blue_five, green_five, remaining],
+            Card::new(Color::Blue, Rank::Number(3)),
+        );
+
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), 80);
+
+        let pending = app.pending_color.as_ref().unwrap();
+        assert_eq!(pending.colors, vec![Color::Green, Color::Blue]);
+        assert_eq!(app.human_hand(0).unwrap().len(), 3);
+
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), 80);
+
+        let state = app.game.as_ref().unwrap().public_state();
+        assert!(app.pending_color.is_none());
+        assert_eq!(state.discard_top, green_five);
+        assert_eq!(state.active_color, Color::Green);
+        assert_eq!(app.human_hand(0).unwrap(), &[remaining]);
+    }
+
+    #[test]
+    fn same_color_number_batch_plays_without_a_picker() {
+        let mut app = App::new(Language::English);
+        app.setup.bot_count = 1;
+        app.start_match().unwrap();
+        let human = app.human_ids[0].clone();
+        let blue_five = Card::new(Color::Blue, Rank::Number(5));
+        let remaining = Card::new(Color::Yellow, Rank::Number(8));
+        app.game.as_mut().unwrap().set_test_turn(
+            &human,
+            vec![blue_five, blue_five, remaining],
+            Card::new(Color::Blue, Rank::Number(3)),
+        );
+
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), 80);
+
+        assert!(app.pending_color.is_none());
+        assert_eq!(
+            app.game.as_ref().unwrap().public_state().active_color,
+            Color::Blue
+        );
+        assert_eq!(app.human_hand(0).unwrap(), &[remaining]);
+    }
+
+    #[test]
     fn g_uses_the_full_hand_and_prompts_only_when_the_batch_ends_in_plus_sixteen() {
         let mut app = App::new(Language::English);
         app.setup.bot_count = 1;
@@ -1329,6 +1435,45 @@ mod tests {
         app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), 80);
         assert!(app.pending_seven.is_none());
         assert!(app.logs.back().unwrap().contains("swapped hands with"));
+    }
+
+    #[test]
+    fn multicolor_seven_chooses_color_before_the_swap_target() {
+        let mut app = App::new(Language::English);
+        app.setup.bot_count = 2;
+        app.start_match().unwrap();
+        let human = app.human_ids[0].clone();
+        let red_seven = Card::new(Color::Red, Rank::Number(7));
+        let blue_seven = Card::new(Color::Blue, Rank::Number(7));
+        app.game.as_mut().unwrap().set_test_turn(
+            &human,
+            vec![
+                red_seven,
+                blue_seven,
+                Card::new(Color::Yellow, Rank::Number(1)),
+            ],
+            Card::new(Color::Red, Rank::Number(5)),
+        );
+
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), 80);
+        assert_eq!(
+            app.pending_color.as_ref().unwrap().colors,
+            vec![Color::Red, Color::Blue]
+        );
+        app.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE), 80);
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), 80);
+
+        assert!(app.pending_color.is_none());
+        assert_eq!(
+            app.pending_seven.as_ref().unwrap().chosen_color,
+            Some(Color::Blue)
+        );
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), 80);
+
+        let state = app.game.as_ref().unwrap().public_state();
+        assert!(app.pending_seven.is_none());
+        assert_eq!(state.discard_top, blue_seven);
+        assert_eq!(state.active_color, Color::Blue);
     }
 
     #[test]
@@ -1683,9 +1828,10 @@ mod tests {
         app.setup.mode = PlayMode::Dual;
         app.setup.bot_count = 0;
         app.start_match().unwrap();
-        app.pending_wild = Some(PendingWild {
+        app.pending_color = Some(PendingColor {
             player_index: 0,
             card: Card::wild(crate::core::Rank::Wild),
+            colors: Color::ALL.to_vec(),
         });
         app.selected_color = 1;
 
@@ -1704,9 +1850,10 @@ mod tests {
         let mut app = App::new(Language::English);
         app.setup.bot_count = 1;
         app.start_match().unwrap();
-        app.pending_wild = Some(PendingWild {
+        app.pending_color = Some(PendingColor {
             player_index: 0,
             card: Card::wild(crate::core::Rank::Wild),
+            colors: Color::ALL.to_vec(),
         });
         app.selected_color = 1;
 

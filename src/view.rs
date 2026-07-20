@@ -17,7 +17,7 @@ pub struct AppView<'a> {
 
 impl<'a> AppView<'a> {
     pub fn new(app: &'a App, images_allowed: bool) -> Self {
-        let overlays = app.pending_wild.is_some()
+        let overlays = app.pending_color.is_some()
             || app.pending_plus_batch.is_some()
             || app.pending_seven.is_some()
             || matches!(
@@ -107,6 +107,7 @@ mod tests {
         app.pending_seven = Some(PendingSeven {
             player_index: 0,
             card: Card::new(Color::Red, Rank::Number(7)),
+            chosen_color: None,
             targets: app.ai_ids.clone(),
             selected_target: 0,
         });

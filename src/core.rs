@@ -330,6 +330,7 @@ pub enum GameError {
     DrawnCardOnly(Card),
     MissingColorChoice,
     UnexpectedColorChoice,
+    InvalidNumberBatchColor(Color),
     MissingSwapTarget,
     UnexpectedSwapTarget,
     InvalidSwapTarget(PlayerId),
@@ -582,29 +583,35 @@ impl Game {
         };
         let mut actions = Vec::new();
         for card in playable {
-            if card.is_wild() {
-                actions.extend(Color::ALL.map(|chosen_color| Action::Play {
-                    card,
-                    chosen_color: Some(chosen_color),
-                    swap_target: None,
-                }));
-            } else if self.house_rules.seven_zero && card.rank == Rank::Number(7) {
-                actions.extend(
-                    self.players
-                        .iter()
-                        .filter(|candidate| candidate.id != *player)
-                        .map(|candidate| Action::Play {
-                            card,
-                            chosen_color: None,
-                            swap_target: Some(candidate.id.clone()),
-                        }),
-                );
+            let chosen_colors = if card.is_wild() {
+                Color::ALL.into_iter().map(Some).collect::<Vec<_>>()
+            } else if let Rank::Number(number) = card.rank {
+                let colors = number_batch_colors(hand, number);
+                if colors.len() > 1 {
+                    colors.into_iter().map(Some).collect()
+                } else {
+                    vec![None]
+                }
             } else {
-                actions.push(Action::Play {
-                    card,
-                    chosen_color: None,
-                    swap_target: None,
-                });
+                vec![None]
+            };
+            let swap_targets = if self.house_rules.seven_zero && card.rank == Rank::Number(7) {
+                self.players
+                    .iter()
+                    .filter(|candidate| candidate.id != *player)
+                    .map(|candidate| Some(candidate.id.clone()))
+                    .collect::<Vec<_>>()
+            } else {
+                vec![None]
+            };
+            for chosen_color in chosen_colors {
+                for swap_target in &swap_targets {
+                    actions.push(Action::Play {
+                        card,
+                        chosen_color,
+                        swap_target: swap_target.clone(),
+                    });
+                }
             }
         }
         actions.push(match self.phase {
@@ -768,12 +775,24 @@ impl Game {
                 GameError::CardNotPlayable(card)
             });
         }
-        if card.is_wild() && chosen_color.is_none() {
-            return Err(GameError::MissingColorChoice);
-        }
-        if !card.is_wild() && chosen_color.is_some() {
-            return Err(GameError::UnexpectedColorChoice);
-        }
+        let number_colors = match card.rank {
+            Rank::Number(number) => number_batch_colors(hand, number),
+            _ => Vec::new(),
+        };
+        let final_color = if card.is_wild() {
+            chosen_color.ok_or(GameError::MissingColorChoice)?
+        } else if number_colors.len() > 1 {
+            let chosen = chosen_color.ok_or(GameError::MissingColorChoice)?;
+            if !number_colors.contains(&chosen) {
+                return Err(GameError::InvalidNumberBatchColor(chosen));
+            }
+            chosen
+        } else {
+            if chosen_color.is_some() {
+                return Err(GameError::UnexpectedColorChoice);
+            }
+            card.color.expect("colored card")
+        };
         let requires_swap_target = self.house_rules.seven_zero && card.rank == Rank::Number(7);
         match (requires_swap_target, swap_target.as_ref()) {
             (true, None) => return Err(GameError::MissingSwapTarget),
@@ -786,9 +805,9 @@ impl Game {
 
         // ===== * NUMBER CARNIVAL * =====
         // Number cards may be stacked as a house rule: playing one discards every
-        // card with the same number. Keep the explicitly played card on top so
-        // its color determines the next legal play.
-        if let Rank::Number(number) = card.rank {
+        // card with the same number. For a multi-color batch, keep a card of the
+        // chosen final color on top so the discard and active color stay aligned.
+        let top_card = if let Rank::Number(number) = card.rank {
             let hand = &mut self.players[player_index].hand;
             let mut stacked = Vec::new();
             hand.retain(|owned| {
@@ -799,12 +818,13 @@ impl Game {
                     true
                 }
             });
-            let selected_index = stacked
+            let top_index = stacked
                 .iter()
-                .position(|owned| *owned == card)
-                .expect("ownership checked above");
-            stacked.remove(selected_index);
+                .rposition(|owned| owned.color == Some(final_color))
+                .expect("final color belongs to the number batch");
+            let top = stacked.remove(top_index);
             self.discard_pile.extend(stacked);
+            top
         } else {
             let hand_index = self.players[player_index]
                 .hand
@@ -812,18 +832,19 @@ impl Game {
                 .position(|owned| *owned == card)
                 .expect("ownership checked above");
             self.players[player_index].hand.remove(hand_index);
-        }
-        self.discard_pile.push(card);
-        self.active_color = chosen_color.or(card.color).expect("play color validated");
+            card
+        };
+        self.discard_pile.push(top_card);
+        self.active_color = final_color;
         self.phase = TurnPhase::AwaitingAction;
 
         let won = self.players[player_index].hand.is_empty();
         let hand_effect = (!won)
-            .then(|| self.apply_card_effect(card, swap_target))
+            .then(|| self.apply_card_effect(top_card, swap_target))
             .flatten();
         let event = self.push_event(EventKind::CardPlayed {
             player: player.clone(),
-            card,
+            card: top_card,
             chosen_color,
             hand_effect,
         });
@@ -1148,6 +1169,20 @@ impl Game {
         self.events.push(event.clone());
         event
     }
+}
+
+fn number_batch_colors(hand: &[Card], number: u8) -> Vec<Color> {
+    hand.iter()
+        .filter_map(|card| {
+            if matches!(card.rank, Rank::Number(candidate) if candidate == number) {
+                card.color
+            } else {
+                None
+            }
+        })
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
 }
 
 fn is_plus_batch_card(card: Card) -> bool {
@@ -2218,7 +2253,7 @@ mod tests {
     }
 
     #[test]
-    fn playing_number_stacks_all_cards_with_same_number() {
+    fn number_batch_requires_a_present_color_and_puts_it_on_top() {
         let mut game = game();
         let current = game.current_player().clone();
         let selected = Card::new(Color::Blue, Rank::Number(3));
@@ -2228,26 +2263,66 @@ mod tests {
         game.discard_pile = vec![Card::new(Color::Blue, Rank::Number(6))];
         game.players[0].hand = vec![other_number, remaining, selected];
 
-        game.apply_action(
-            &current,
-            Action::Play {
-                card: selected,
-                chosen_color: None,
-                swap_target: None,
-            },
-        )
-        .unwrap();
+        let before_state = game.public_state();
+        let before_hand = game.players[0].hand.clone();
+        assert_eq!(
+            game.apply_action(
+                &current,
+                Action::Play {
+                    card: selected,
+                    chosen_color: None,
+                    swap_target: None,
+                },
+            )
+            .unwrap_err(),
+            GameError::MissingColorChoice
+        );
+        assert_eq!(game.public_state(), before_state);
+        assert_eq!(game.players[0].hand, before_hand);
+        assert_eq!(
+            game.apply_action(
+                &current,
+                Action::Play {
+                    card: selected,
+                    chosen_color: Some(Color::Yellow),
+                    swap_target: None,
+                },
+            )
+            .unwrap_err(),
+            GameError::InvalidNumberBatchColor(Color::Yellow)
+        );
+        assert_eq!(game.public_state(), before_state);
+        assert_eq!(game.players[0].hand, before_hand);
+
+        let event = game
+            .apply_action(
+                &current,
+                Action::Play {
+                    card: selected,
+                    chosen_color: Some(Color::Red),
+                    swap_target: None,
+                },
+            )
+            .unwrap();
 
         assert_eq!(game.players[0].hand, vec![remaining]);
         assert_eq!(
             game.discard_pile,
             vec![
                 Card::new(Color::Blue, Rank::Number(6)),
-                other_number,
                 selected,
+                other_number,
             ]
         );
-        assert_eq!(game.active_color, Color::Blue);
+        assert_eq!(game.active_color, Color::Red);
+        assert!(matches!(
+            event.kind,
+            EventKind::CardPlayed {
+                card: event_card,
+                chosen_color: Some(Color::Red),
+                ..
+            } if event_card == other_number
+        ));
     }
 
     #[test]
@@ -2263,7 +2338,7 @@ mod tests {
             &current,
             Action::Play {
                 card: selected,
-                chosen_color: None,
+                chosen_color: Some(Color::Red),
                 swap_target: None,
             },
         )
@@ -2485,7 +2560,7 @@ mod tests {
                 &current,
                 Action::Play {
                     card: red,
-                    chosen_color: None,
+                    chosen_color: Some(Color::Blue),
                     swap_target: Some(target),
                 },
             )

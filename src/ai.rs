@@ -85,6 +85,24 @@ pub fn choose_action<R: Rng + ?Sized>(
                 dominant_color(hand, rng)
             }
         })
+    } else if let Rank::Number(number) = selected.rank {
+        let allowed = legal_actions
+            .iter()
+            .filter_map(|action| match action {
+                Action::Play {
+                    card, chosen_color, ..
+                } if *card == selected => *chosen_color,
+                _ => None,
+            })
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        (!allowed.is_empty()).then(|| match difficulty {
+            Difficulty::Easy => allowed[rng.gen_range(0..allowed.len())],
+            Difficulty::Normal | Difficulty::Hard | Difficulty::Extreme => {
+                dominant_number_batch_color(hand, number, &allowed, rng)
+            }
+        })
     } else {
         None
     };
@@ -210,6 +228,34 @@ fn dominant_color<R: Rng + ?Sized>(hand: &[Card], rng: &mut R) -> Color {
         .into_iter()
         .filter(|color| counts.get(color).copied().unwrap_or(0) == max)
         .collect();
+    choices[rng.gen_range(0..choices.len())]
+}
+
+fn dominant_number_batch_color<R: Rng + ?Sized>(
+    hand: &[Card],
+    number: u8,
+    allowed: &[Color],
+    rng: &mut R,
+) -> Color {
+    let counts = allowed
+        .iter()
+        .copied()
+        .map(|color| {
+            let count = hand
+                .iter()
+                .filter(|card| {
+                    card.color == Some(color)
+                        && !matches!(card.rank, Rank::Number(candidate) if candidate == number)
+                })
+                .count();
+            (color, count)
+        })
+        .collect::<Vec<_>>();
+    let max = counts.iter().map(|(_, count)| *count).max().unwrap_or(0);
+    let choices = counts
+        .into_iter()
+        .filter_map(|(color, count)| (count == max).then_some(color))
+        .collect::<Vec<_>>();
     choices[rng.gen_range(0..choices.len())]
 }
 
@@ -348,6 +394,41 @@ mod tests {
             Action::Play {
                 card: wild,
                 chosen_color: Some(Color::Blue),
+                swap_target: None,
+            }
+        );
+    }
+
+    #[test]
+    fn normal_number_batch_chooses_an_available_dominant_remaining_color() {
+        let blue_five = Card::new(Color::Blue, Rank::Number(5));
+        let green_five = Card::new(Color::Green, Rank::Number(5));
+        let hand = [
+            blue_five,
+            green_five,
+            Card::new(Color::Green, Rank::Number(1)),
+            Card::new(Color::Green, Rank::Number(2)),
+            Card::new(Color::Red, Rank::Number(9)),
+        ];
+        let legal = [
+            Action::Play {
+                card: blue_five,
+                chosen_color: Some(Color::Blue),
+                swap_target: None,
+            },
+            Action::Play {
+                card: blue_five,
+                chosen_color: Some(Color::Green),
+                swap_target: None,
+            },
+        ];
+        let mut rng = StdRng::seed_from_u64(44);
+
+        assert_eq!(
+            choose_action(Difficulty::Normal, &state(6), &hand, &legal, &mut rng),
+            Action::Play {
+                card: blue_five,
+                chosen_color: Some(Color::Green),
                 swap_target: None,
             }
         );

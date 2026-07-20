@@ -257,9 +257,21 @@ pub fn render(app: &App, backend: GraphicsBackend, viewport: Viewport) -> Canvas
             app.language.text(Message::QuitBody),
         ),
     }
-    if app.pending_wild.is_some() || app.pending_plus_batch.is_some() {
-        let colors = Color::ALL
-            .into_iter()
+    if app.pending_color.is_some() || app.pending_plus_batch.is_some() {
+        let (color_values, player_index): (&[Color], usize) =
+            if let Some(pending) = app.pending_color.as_ref() {
+                (&pending.colors, pending.player_index)
+            } else {
+                (
+                    &Color::ALL,
+                    app.pending_plus_batch
+                        .as_ref()
+                        .map_or(0, |pending| pending.player_index),
+                )
+            };
+        let colors = color_values
+            .iter()
+            .copied()
             .enumerate()
             .map(|(index, value)| {
                 if index == app.selected_color {
@@ -270,15 +282,6 @@ pub fn render(app: &App, backend: GraphicsBackend, viewport: Viewport) -> Canvas
             })
             .collect::<Vec<_>>()
             .join("  ");
-        let player_index = app
-            .pending_wild
-            .map(|pending| pending.player_index)
-            .or_else(|| {
-                app.pending_plus_batch
-                    .as_ref()
-                    .map(|pending| pending.player_index)
-            })
-            .unwrap_or(0);
         render_compact_overlay(
             &mut canvas,
             app.language.text(Message::ChooseColor),
@@ -762,7 +765,7 @@ fn render_result(canvas: &mut Canvas, app: &App) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::{PendingSeven, PendingWild};
+    use crate::app::{PendingColor, PendingSeven};
     use crate::frontend::{FallbackReason, GraphicsChoice};
     use crate::i18n::Language;
 
@@ -891,9 +894,10 @@ mod tests {
         let mut app = App::with_graphics(Language::English, GraphicsChoice::GraphicsBeta);
         app.setup.bot_count = 1;
         app.start_match().unwrap();
-        app.pending_wild = Some(PendingWild {
+        app.pending_color = Some(PendingColor {
             player_index: 0,
             card: Card::wild(crate::core::Rank::Wild),
+            colors: Color::ALL.to_vec(),
         });
         let picker = render(
             &app,
@@ -918,9 +922,10 @@ mod tests {
         let mut app = App::with_graphics(Language::Chinese, GraphicsChoice::Text);
         app.setup.bot_count = 1;
         app.start_match().unwrap();
-        app.pending_wild = Some(PendingWild {
+        app.pending_color = Some(PendingColor {
             player_index: 0,
             card: Card::wild(crate::core::Rank::Wild),
+            colors: Color::ALL.to_vec(),
         });
         let picker = render(
             &app,
@@ -939,6 +944,31 @@ mod tests {
     }
 
     #[test]
+    fn number_batch_color_picker_lists_only_colors_in_the_batch() {
+        let mut app = App::with_graphics(Language::English, GraphicsChoice::Text);
+        app.setup.bot_count = 1;
+        app.start_match().unwrap();
+        app.pending_color = Some(PendingColor {
+            player_index: 0,
+            card: Card::new(Color::Blue, crate::core::Rank::Number(5)),
+            colors: vec![Color::Green, Color::Blue],
+        });
+
+        let picker = render(
+            &app,
+            GraphicsBackend::Text(FallbackReason::Manual),
+            Viewport {
+                columns: 70,
+                rows: 26,
+            },
+        )
+        .plain_text();
+
+        assert!(picker.contains("[GREEN]  BLUE"));
+        assert!(!picker.contains("RED  YELLOW"));
+    }
+
+    #[test]
     fn seven_target_picker_lists_public_players_and_suppresses_images() {
         let mut app = App::with_graphics(Language::English, GraphicsChoice::GraphicsBeta);
         app.setup.bot_count = 2;
@@ -946,6 +976,7 @@ mod tests {
         app.pending_seven = Some(PendingSeven {
             player_index: 0,
             card: Card::new(Color::Red, crate::core::Rank::Number(7)),
+            chosen_color: None,
             targets: app.ai_ids.clone(),
             selected_target: 0,
         });
